@@ -1,5 +1,4 @@
 #include <pebble.h>
-#include "jw_texts_data.h"
 
 #define KEY_ACTION 0
 #define KEY_DATE 1
@@ -7,14 +6,17 @@
 #define KEY_TEXT 3
 #define KEY_COMMENTARY 4
 #define KEY_ERROR 5
-#define KEY_YEAR 6
-#define KEY_MONTH 7
-#define KEY_MONTH_ENTRY_DATE 8
-#define KEY_MONTH_ENTRY_REF 9
-#define KEY_MONTH_ENTRY_TEXT 10
-#define KEY_MONTH_ENTRY_COMMENTARY 11
-#define KEY_MONTH_TOTAL 12
-#define KEY_MONTH_INDEX 13
+#define KEY_LANGUAGE 6
+#define KEY_YEAR 7
+#define KEY_MONTH 8
+#define KEY_MONTH_ENTRY_DATE 9
+#define KEY_MONTH_ENTRY_REF 10
+#define KEY_MONTH_ENTRY_TEXT 11
+#define KEY_MONTH_ENTRY_COMMENTARY 12
+#define KEY_MONTH_TOTAL 13
+#define KEY_MONTH_INDEX 14
+
+#define PERSIST_KEY_LANGUAGE 1
 
 static const int ACTION_FETCH = 1;
 static const int ACTION_FETCH_RESULT = 2;
@@ -35,10 +37,12 @@ static int s_current_year;
 static int s_current_month;
 static DisplayMode s_mode;
 static bool s_waiting_for_phone;
+static char s_language[8];
 
-static DailyTextEntry s_remote_entry;
+static char s_remote_ref[256];
+static char s_remote_text[2048];
+static char s_remote_commentary[2048];
 static bool s_has_remote_entry;
-static char s_remote_date[11];
 
 static void update_ui(void);
 static void request_from_phone(void);
@@ -82,23 +86,27 @@ static void prv_format_date_str(char *buf, int size, int y, int m, int d) {
     snprintf(buf, size, "%s %d%s, %d", mon, d, sfx, y);
 }
 
-static bool is_local_month(int year, int month) {
-    return year == 2026 && month == 7;
-}
-
 static void line_layer_update(Layer *layer, GContext *ctx) {
     GRect bounds = layer_get_bounds(layer);
-    graphics_context_set_stroke_color(ctx, GColorLightGray);
+    graphics_context_set_stroke_color(ctx, GColorDarkGray);
+    graphics_context_set_stroke_width(ctx, 2);
     graphics_draw_line(ctx, GPoint(0, 0), GPoint(bounds.size.w, 0));
 }
 
 static void select_click_handler(ClickRecognizerRef recognizer, void *context) {
     s_mode = (s_mode == MODE_VERSE) ? MODE_COMMENTARY : MODE_VERSE;
+    scroll_layer_set_content_offset(s_scroll_layer, GPoint(0, 0), false);
     update_ui();
 }
 
 static void up_click_handler(ClickRecognizerRef recognizer, void *context) {
-    if (s_current_day > 1) {
+    GPoint offset = scroll_layer_get_content_offset(s_scroll_layer);
+    if (offset.y < 0) {
+        GRect frame = layer_get_frame(scroll_layer_get_layer(s_scroll_layer));
+        int new_y = offset.y + frame.size.h;
+        if (new_y > 0) new_y = 0;
+        scroll_layer_set_content_offset(s_scroll_layer, GPoint(0, new_y), true);
+    } else if (s_current_day > 1) {
         s_current_day--;
         s_has_remote_entry = false;
         s_waiting_for_phone = false;
@@ -108,7 +116,15 @@ static void up_click_handler(ClickRecognizerRef recognizer, void *context) {
 }
 
 static void down_click_handler(ClickRecognizerRef recognizer, void *context) {
-    if (s_current_day < s_days_in_month) {
+    GPoint offset = scroll_layer_get_content_offset(s_scroll_layer);
+    GSize content = scroll_layer_get_content_size(s_scroll_layer);
+    GRect frame = layer_get_frame(scroll_layer_get_layer(s_scroll_layer));
+    int max_scroll = content.h - frame.size.h;
+    if (max_scroll > 0 && offset.y > -max_scroll) {
+        int new_y = offset.y - frame.size.h;
+        if (new_y < -max_scroll) new_y = -max_scroll;
+        scroll_layer_set_content_offset(s_scroll_layer, GPoint(0, new_y), true);
+    } else if (s_current_day < s_days_in_month) {
         s_current_day++;
         s_has_remote_entry = false;
         s_waiting_for_phone = false;
@@ -135,56 +151,37 @@ static void update_date_display(void) {
 }
 
 static void update_ui(void) {
-    DailyTextEntry entry;
-    bool found = false;
-
-    if (s_has_remote_entry) {
-        entry = s_remote_entry;
-        found = true;
-    } else if (is_local_month(s_current_year, s_current_month)) {
-        int idx = s_current_day - 1;
-        if (idx >= 0 && idx < DAILY_TEXT_COUNT) {
-            find_entry_by_index(idx, &entry);
-            found = true;
-        }
-    }
-
-    if (!found && !s_waiting_for_phone) {
-        s_waiting_for_phone = true;
-        request_from_phone();
-    }
-
     update_date_display();
 
     if (s_waiting_for_phone) {
         text_layer_set_text(s_ref_layer, "");
         text_layer_set_text(s_body_layer, "Loading...");
-        scroll_layer_set_content_size(s_scroll_layer, GSize(144, 2000));
+        scroll_layer_set_content_size(s_scroll_layer, GSize(192, 200));
         layer_mark_dirty(text_layer_get_layer(s_body_layer));
         return;
     }
 
-    if (!found) {
+    if (!s_has_remote_entry) {
         text_layer_set_text(s_ref_layer, "");
-        text_layer_set_text(s_body_layer, "No data available.");
-        scroll_layer_set_content_size(s_scroll_layer, GSize(144, 2000));
+        text_layer_set_text(s_body_layer, "No data available.\nPress SELECT to retry.");
+        scroll_layer_set_content_size(s_scroll_layer, GSize(192, 200));
         layer_mark_dirty(text_layer_get_layer(s_body_layer));
         return;
     }
 
-    text_layer_set_text(s_ref_layer, entry.ref);
+    text_layer_set_text(s_ref_layer, s_remote_ref);
 
-    static char body_text[2000];
+    static char body_text[2048];
     if (s_mode == MODE_VERSE) {
-        snprintf(body_text, sizeof(body_text), "\"%s\"", entry.text);
+        snprintf(body_text, sizeof(body_text), "\"%s\"", s_remote_text);
     } else {
-        snprintf(body_text, sizeof(body_text), "%s", entry.commentary);
+        snprintf(body_text, sizeof(body_text), "%s", s_remote_commentary);
     }
     text_layer_set_text(s_body_layer, body_text);
 
     GSize max_size = text_layer_get_content_size(s_body_layer);
-    scroll_layer_set_content_size(s_scroll_layer, GSize(144, max_size.h + 4));
-    scroll_layer_set_content_offset(s_scroll_layer, GPoint(0, 0), false);
+    int content_h = max_size.h + 4;
+    scroll_layer_set_content_size(s_scroll_layer, GSize(192, content_h));
     layer_mark_dirty(text_layer_get_layer(s_body_layer));
 }
 
@@ -196,6 +193,7 @@ static void request_from_phone(void) {
     app_message_outbox_begin(&iter);
     dict_write_int32(iter, KEY_ACTION, ACTION_FETCH);
     dict_write_cstring(iter, KEY_DATE, date_str);
+    dict_write_cstring(iter, KEY_LANGUAGE, s_language);
     app_message_outbox_send();
 }
 
@@ -206,26 +204,36 @@ static void inbox_received_handler(DictionaryIterator *iter, void *context) {
     int action = action_t->value->int32;
 
     if (action == ACTION_FETCH_RESULT) {
-        Tuple *date_t = dict_find(iter, KEY_DATE);
         Tuple *ref_t = dict_find(iter, KEY_REF);
         Tuple *text_t = dict_find(iter, KEY_TEXT);
         Tuple *comm_t = dict_find(iter, KEY_COMMENTARY);
-        if (date_t && ref_t && text_t && comm_t) {
-            strncpy(s_remote_date, date_t->value->cstring, sizeof(s_remote_date) - 1);
-            s_remote_date[sizeof(s_remote_date) - 1] = 0;
-            s_remote_entry.date = s_remote_date;
-            s_remote_entry.ref = ref_t->value->cstring;
-            s_remote_entry.text = text_t->value->cstring;
-            s_remote_entry.commentary = comm_t->value->cstring;
+        if (ref_t && text_t && comm_t) {
+            strncpy(s_remote_ref, ref_t->value->cstring, sizeof(s_remote_ref) - 1);
+            s_remote_ref[sizeof(s_remote_ref) - 1] = '\0';
+            strncpy(s_remote_text, text_t->value->cstring, sizeof(s_remote_text) - 1);
+            s_remote_text[sizeof(s_remote_text) - 1] = '\0';
+            strncpy(s_remote_commentary, comm_t->value->cstring, sizeof(s_remote_commentary) - 1);
+            s_remote_commentary[sizeof(s_remote_commentary) - 1] = '\0';
             s_has_remote_entry = true;
             s_waiting_for_phone = false;
+            scroll_layer_set_content_offset(s_scroll_layer, GPoint(0, 0), false);
             update_ui();
         }
     } else if (action == ACTION_FETCH_ERROR) {
         s_waiting_for_phone = false;
         text_layer_set_text(s_ref_layer, "");
-        text_layer_set_text(s_body_layer, "Failed to load.\nPress any key.");
+        text_layer_set_text(s_body_layer, "Failed to load.\nPress SELECT to retry.");
         layer_mark_dirty(text_layer_get_layer(s_body_layer));
+    } else if (action == 4) {
+        Tuple *lang_t = dict_find(iter, KEY_LANGUAGE);
+        if (lang_t) {
+            strncpy(s_language, lang_t->value->cstring, sizeof(s_language) - 1);
+            s_language[sizeof(s_language) - 1] = '\0';
+            persist_write_string(PERSIST_KEY_LANGUAGE, s_language);
+            s_has_remote_entry = false;
+            s_waiting_for_phone = false;
+            update_ui();
+        }
     }
 }
 
@@ -247,37 +255,36 @@ static void window_load(Window *window) {
     Layer *root = window_get_root_layer(window);
     GRect bounds = layer_get_bounds(root);
 
-    s_date_layer = text_layer_create(GRect(4, 0, bounds.size.w - 8, 24));
-    text_layer_set_font(s_date_layer, fonts_get_system_font(FONT_KEY_GOTHIC_18_BOLD));
+    s_date_layer = text_layer_create(GRect(4, 4, bounds.size.w - 8, 30));
+    text_layer_set_font(s_date_layer, fonts_get_system_font(FONT_KEY_GOTHIC_24_BOLD));
     text_layer_set_text_alignment(s_date_layer, GTextAlignmentCenter);
-    text_layer_set_text_color(s_date_layer, GColorWhite);
+    text_layer_set_text_color(s_date_layer, GColorBlack);
     text_layer_set_background_color(s_date_layer, GColorClear);
     layer_add_child(root, text_layer_get_layer(s_date_layer));
 
-    s_line_layer = layer_create(GRect(4, 24, bounds.size.w - 8, 1));
+    s_line_layer = layer_create(GRect(4, 36, bounds.size.w - 8, 2));
     layer_set_update_proc(s_line_layer, line_layer_update);
     layer_add_child(root, s_line_layer);
 
-    s_ref_layer = text_layer_create(GRect(4, 28, bounds.size.w - 8, 22));
+    s_ref_layer = text_layer_create(GRect(4, 42, bounds.size.w - 8, 24));
     text_layer_set_font(s_ref_layer, fonts_get_system_font(FONT_KEY_GOTHIC_18));
     text_layer_set_text_alignment(s_ref_layer, GTextAlignmentCenter);
-    text_layer_set_text_color(s_ref_layer, GColorWhite);
+    text_layer_set_text_color(s_ref_layer, GColorBlack);
     text_layer_set_background_color(s_ref_layer, GColorClear);
     layer_add_child(root, text_layer_get_layer(s_ref_layer));
 
-    s_body_layer = text_layer_create(GRect(0, 0, bounds.size.w - 8, 2000));
-    text_layer_set_font(s_body_layer, fonts_get_system_font(FONT_KEY_GOTHIC_14));
-    text_layer_set_text_color(s_body_layer, GColorWhite);
+    s_body_layer = text_layer_create(GRect(0, 0, bounds.size.w - 8, 3000));
+    text_layer_set_font(s_body_layer, fonts_get_system_font(FONT_KEY_GOTHIC_18));
+    text_layer_set_text_color(s_body_layer, GColorBlack);
     text_layer_set_background_color(s_body_layer, GColorClear);
     text_layer_set_overflow_mode(s_body_layer, GTextOverflowModeWordWrap);
 
-    s_scroll_layer = scroll_layer_create(GRect(4, 52, bounds.size.w - 8, bounds.size.h - 52));
-    scroll_layer_set_click_config_onto_window(s_scroll_layer, window);
+    s_scroll_layer = scroll_layer_create(GRect(4, 70, bounds.size.w - 8, bounds.size.h - 70));
     scroll_layer_add_child(s_scroll_layer, text_layer_get_layer(s_body_layer));
     scroll_layer_set_paging(s_scroll_layer, false);
     layer_add_child(root, scroll_layer_get_layer(s_scroll_layer));
 
-    window_set_background_color(window, GColorBlack);
+    window_set_background_color(window, GColorWhite);
     update_ui();
 }
 
@@ -300,9 +307,11 @@ static void init(void) {
     s_waiting_for_phone = false;
     s_has_remote_entry = false;
 
-    if (is_local_month(s_current_year, s_current_month)) {
-        if (s_current_day < 1 || s_current_day > DAILY_TEXT_COUNT)
-            s_current_day = 1;
+    if (persist_exists(PERSIST_KEY_LANGUAGE)) {
+        persist_read_string(PERSIST_KEY_LANGUAGE, s_language, sizeof(s_language));
+    } else {
+        strncpy(s_language, "en", sizeof(s_language) - 1);
+        s_language[sizeof(s_language) - 1] = '\0';
     }
 
     tick_timer_service_subscribe(MINUTE_UNIT, tick_handler);
@@ -311,7 +320,7 @@ static void init(void) {
     app_message_register_inbox_dropped(inbox_dropped_handler);
     app_message_register_outbox_failed(outbox_failed_handler);
     app_message_register_outbox_sent(outbox_sent_handler);
-    app_message_open(2048, 256);
+    app_message_open(2048, 512);
 
     s_window = window_create();
     window_set_window_handlers(s_window, (WindowHandlers){
@@ -320,6 +329,8 @@ static void init(void) {
     });
     window_set_click_config_provider(s_window, click_config_provider);
     window_stack_push(s_window, true);
+
+    request_from_phone();
 }
 
 static void deinit(void) {

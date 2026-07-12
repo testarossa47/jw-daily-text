@@ -1,10 +1,21 @@
+const CONFIG_URL = "https://testarossa47.github.io/jw-daily-text/config/";
+const DEFAULT_LANG = { locale: "en", lib: "lp-e", name: "English" };
+
 function stripTags(text) {
 	return text.replace(/<[^>]+>/g, "").replace(/\s+/g, " ").replace(/\u200b/g, "").trim();
 }
 
-function fetchDailyTextFromWol(dateStr, callback) {
+function getStoredLanguage() {
+	try {
+		const stored = localStorage.getItem("dt_language");
+		if (stored) return JSON.parse(stored);
+	} catch (e) {}
+	return DEFAULT_LANG;
+}
+
+function fetchDailyTextFromWol(dateStr, lang, callback) {
 	const parts = dateStr.split("-");
-	const url = `https://wol.jw.org/en/wol/dt/r1/lp-e/${parseInt(parts[0])}/${parseInt(parts[1])}/${parseInt(parts[2])}`;
+	const url = `https://wol.jw.org/${lang.locale}/wol/dt/r1/${lang.lib}/${parseInt(parts[0])}/${parseInt(parts[1])}/${parseInt(parts[2])}`;
 
 	const req = new XMLHttpRequest();
 	req.open("GET", url, true);
@@ -53,22 +64,39 @@ function fetchDailyTextFromWol(dateStr, callback) {
 	req.send();
 }
 
-function getMonthData(year, month) {
-	const ym = FULL_DATA[year];
-	if (!ym) return null;
-	const mm = String(month).padStart(2, "0");
-	return ym[mm] || null;
-}
-
 Pebble.addEventListener("ready", function () {
 	console.log("JW Daily Text phone proxy ready");
 });
 
+Pebble.addEventListener("showConfiguration", function () {
+	const lang = getStoredLanguage();
+	const url = CONFIG_URL + "?locale=" + encodeURIComponent(lang.locale) + "&lib=" + encodeURIComponent(lang.lib);
+	console.log("Opening config: " + url);
+	Pebble.openURL(url);
+});
+
+Pebble.addEventListener("webviewclosed", function (e) {
+	try {
+		const config = JSON.parse(decodeURIComponent(e.response));
+		if (config && config.locale && config.lib) {
+			localStorage.setItem("dt_language", JSON.stringify(config));
+			console.log("Language set: " + config.name + " (" + config.locale + ")");
+			Pebble.sendAppMessage({
+				action: "language_changed",
+				language: config.locale
+			});
+		}
+	} catch (err) {
+		console.log("Config error: " + err);
+	}
+});
+
 Pebble.addEventListener("appmessage", function (e) {
 	const payload = e.payload;
+	const lang = getStoredLanguage();
 
 	if (payload.action === "fetch") {
-		fetchDailyTextFromWol(payload.date, function (result) {
+		fetchDailyTextFromWol(payload.date, lang, function (result) {
 			if (result.error) {
 				Pebble.sendAppMessage({
 					action: "fetch_error",
@@ -88,48 +116,7 @@ Pebble.addEventListener("appmessage", function (e) {
 		return;
 	}
 
-	if (payload.action === "fetch_month") {
-		const year = payload.year;
-		const month = payload.month;
-		const data = getMonthData(year, month);
-		if (data) {
-			let idx = 0;
-			const keys = Object.keys(data).sort();
-			for (const dateStr of keys) {
-				const e = data[dateStr];
-				Pebble.sendAppMessage({
-					action: "month_entry",
-					date: dateStr,
-					ref: e.ref,
-					text: e.text,
-					commentary: e.commentary,
-					month_total: keys.length,
-					month_index: idx + 1
-				});
-				idx++;
-			}
-			console.log(`Sent ${keys.length} entries for ${year}-${month}`);
-		} else {
-			console.log(`No data for ${year}-${month}, falling back to WOL`);
-			const daysInMonth = new Date(parseInt(year), parseInt(month), 0).getDate();
-			let pending = daysInMonth;
-			for (let d = 1; d <= daysInMonth; d++) {
-				const ds = year + "-" + String(month).padStart(2, "0") + "-" + String(d).padStart(2, "0");
-				fetchDailyTextFromWol(ds, function (result) {
-					if (!result.error) {
-						Pebble.sendAppMessage({
-							action: "month_entry",
-							date: result.date,
-							ref: result.ref,
-							text: result.text,
-							commentary: result.commentary,
-							month_total: daysInMonth,
-							month_index: daysInMonth - pending + 1
-						});
-					}
-					pending--;
-				});
-			}
-		}
+	if (payload.action === "open_config") {
+		Pebble.showConfiguration();
 	}
 });
