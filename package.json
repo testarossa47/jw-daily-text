@@ -2,23 +2,35 @@
   "name": "jw-daily-text",
   "author": "JW Daily Text Contributors",
   "version": "1.1.0",
-  "description": "Daily Text app for Pebble smartwatches using the Moddable SDK. Displays Jehovah's Witnesses daily Bible scripture with commentary.",
+  "description": "Daily Text app for Pebble smartwatches. Displays Jehovah's Witnesses daily Bible scripture with commentary.",
   "keywords": ["pebble-app", "jw", "daily-text"],
   "private": true,
   "dependencies": {},
   "pebble": {
     "displayName": "Daily Text",
     "uuid": "743dd3fe-6dd7-4fd5-b425-f9fe23252cc5",
-    "projectType": "moddable",
     "sdkVersion": "3",
     "enableMultiJS": true,
-    "targetPlatforms": [
-      "emery"
-    ],
+    "targetPlatforms": ["emery"],
     "watchapp": {
       "watchface": false
     },
-    "messageKeys": [],
+    "messageKeys": [
+      "action",
+      "date",
+      "ref",
+      "text",
+      "commentary",
+      "error",
+      "year",
+      "month",
+      "month_entry_date",
+      "month_entry_ref",
+      "month_entry_text",
+      "month_entry_commentary",
+      "month_total",
+      "month_index"
+    ],
     "resources": {
       "media": []
     }
