@@ -1,20 +1,21 @@
 #include <pebble.h>
+#include <message_keys.auto.h>
 
-#define KEY_ACTION 0
-#define KEY_DATE 1
-#define KEY_REF 2
-#define KEY_TEXT 3
-#define KEY_COMMENTARY 4
-#define KEY_ERROR 5
-#define KEY_LANGUAGE 6
-#define KEY_YEAR 7
-#define KEY_MONTH 8
-#define KEY_MONTH_ENTRY_DATE 9
-#define KEY_MONTH_ENTRY_REF 10
-#define KEY_MONTH_ENTRY_TEXT 11
-#define KEY_MONTH_ENTRY_COMMENTARY 12
-#define KEY_MONTH_TOTAL 13
-#define KEY_MONTH_INDEX 14
+#define KEY_ACTION MESSAGE_KEY_action
+#define KEY_DATE MESSAGE_KEY_date
+#define KEY_REF MESSAGE_KEY_ref
+#define KEY_TEXT MESSAGE_KEY_text
+#define KEY_COMMENTARY MESSAGE_KEY_commentary
+#define KEY_ERROR MESSAGE_KEY_error
+#define KEY_LANGUAGE MESSAGE_KEY_language
+#define KEY_YEAR MESSAGE_KEY_year
+#define KEY_MONTH MESSAGE_KEY_month
+#define KEY_MONTH_ENTRY_DATE MESSAGE_KEY_month_entry_date
+#define KEY_MONTH_ENTRY_REF MESSAGE_KEY_month_entry_ref
+#define KEY_MONTH_ENTRY_TEXT MESSAGE_KEY_month_entry_text
+#define KEY_MONTH_ENTRY_COMMENTARY MESSAGE_KEY_month_entry_commentary
+#define KEY_MONTH_TOTAL MESSAGE_KEY_month_total
+#define KEY_MONTH_INDEX MESSAGE_KEY_month_index
 
 #define PERSIST_KEY_LANGUAGE 1
 
@@ -94,6 +95,12 @@ static void line_layer_update(Layer *layer, GContext *ctx) {
 }
 
 static void select_click_handler(ClickRecognizerRef recognizer, void *context) {
+    if (!s_has_remote_entry) {
+        s_waiting_for_phone = true;
+        update_ui();
+        request_from_phone();
+        return;
+    }
     s_mode = (s_mode == MODE_VERSE) ? MODE_COMMENTARY : MODE_VERSE;
     scroll_layer_set_content_offset(s_scroll_layer, GPoint(0, 0), false);
     update_ui();
@@ -109,9 +116,10 @@ static void up_click_handler(ClickRecognizerRef recognizer, void *context) {
     } else if (s_current_day > 1) {
         s_current_day--;
         s_has_remote_entry = false;
-        s_waiting_for_phone = false;
+        s_waiting_for_phone = true;
         s_mode = MODE_VERSE;
         update_ui();
+        request_from_phone();
     }
 }
 
@@ -127,9 +135,10 @@ static void down_click_handler(ClickRecognizerRef recognizer, void *context) {
     } else if (s_current_day < s_days_in_month) {
         s_current_day++;
         s_has_remote_entry = false;
-        s_waiting_for_phone = false;
+        s_waiting_for_phone = true;
         s_mode = MODE_VERSE;
         update_ui();
+        request_from_phone();
     }
 }
 
@@ -266,20 +275,20 @@ static void window_load(Window *window) {
     layer_set_update_proc(s_line_layer, line_layer_update);
     layer_add_child(root, s_line_layer);
 
-    s_ref_layer = text_layer_create(GRect(4, 42, bounds.size.w - 8, 24));
-    text_layer_set_font(s_ref_layer, fonts_get_system_font(FONT_KEY_GOTHIC_18));
+    s_ref_layer = text_layer_create(GRect(4, 42, bounds.size.w - 8, 28));
+    text_layer_set_font(s_ref_layer, fonts_get_system_font(FONT_KEY_GOTHIC_18_BOLD));
     text_layer_set_text_alignment(s_ref_layer, GTextAlignmentCenter);
     text_layer_set_text_color(s_ref_layer, GColorBlack);
     text_layer_set_background_color(s_ref_layer, GColorClear);
     layer_add_child(root, text_layer_get_layer(s_ref_layer));
 
     s_body_layer = text_layer_create(GRect(0, 0, bounds.size.w - 8, 3000));
-    text_layer_set_font(s_body_layer, fonts_get_system_font(FONT_KEY_GOTHIC_18));
+    text_layer_set_font(s_body_layer, fonts_get_system_font(FONT_KEY_GOTHIC_24));
     text_layer_set_text_color(s_body_layer, GColorBlack);
     text_layer_set_background_color(s_body_layer, GColorClear);
     text_layer_set_overflow_mode(s_body_layer, GTextOverflowModeWordWrap);
 
-    s_scroll_layer = scroll_layer_create(GRect(4, 70, bounds.size.w - 8, bounds.size.h - 70));
+    s_scroll_layer = scroll_layer_create(GRect(4, 74, bounds.size.w - 8, bounds.size.h - 74));
     scroll_layer_add_child(s_scroll_layer, text_layer_get_layer(s_body_layer));
     scroll_layer_set_paging(s_scroll_layer, false);
     layer_add_child(root, scroll_layer_get_layer(s_scroll_layer));

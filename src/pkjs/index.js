@@ -1,21 +1,23 @@
 const CONFIG_URL = "https://testarossa47.github.io/jw-daily-text/config/";
-const DEFAULT_LANG = { locale: "en", lib: "lp-e", name: "English" };
+
+const ACTION_FETCH = 1;
+const ACTION_FETCH_RESULT = 2;
+const ACTION_FETCH_ERROR = 3;
+const ACTION_LANGUAGE_CHANGED = 4;
+const ACTION_OPEN_CONFIG = 5;
 
 function stripTags(text) {
 	return text.replace(/<[^>]+>/g, "").replace(/\s+/g, " ").replace(/\u200b/g, "").trim();
 }
 
-function getStoredLanguage() {
-	try {
-		const stored = localStorage.getItem("dt_language");
-		if (stored) return JSON.parse(stored);
-	} catch (e) {}
-	return DEFAULT_LANG;
+function getLib(locale) {
+	return locale === "en" ? "lp-e" : "lfb-" + locale;
 }
 
-function fetchDailyTextFromWol(dateStr, lang, callback) {
+function fetchDailyTextFromWol(dateStr, locale, callback) {
 	const parts = dateStr.split("-");
-	const url = `https://wol.jw.org/${lang.locale}/wol/dt/r1/${lang.lib}/${parseInt(parts[0])}/${parseInt(parts[1])}/${parseInt(parts[2])}`;
+	const lib = getLib(locale);
+	const url = `https://wol.jw.org/${locale}/wol/dt/r1/${lib}/${parseInt(parts[0])}/${parseInt(parts[1])}/${parseInt(parts[2])}`;
 
 	const req = new XMLHttpRequest();
 	req.open("GET", url, true);
@@ -69,22 +71,19 @@ Pebble.addEventListener("ready", function () {
 });
 
 Pebble.addEventListener("showConfiguration", function () {
-	const lang = getStoredLanguage();
-	const url = CONFIG_URL + "?locale=" + encodeURIComponent(lang.locale) + "&lib=" + encodeURIComponent(lang.lib);
-	console.log("Opening config: " + url);
-	Pebble.openURL(url);
+	Pebble.openURL(CONFIG_URL);
 });
 
 Pebble.addEventListener("webviewclosed", function (e) {
+	if (!e.response) return;
 	try {
 		const config = JSON.parse(decodeURIComponent(e.response));
 		if (config && config.locale && config.lib) {
-			localStorage.setItem("dt_language", JSON.stringify(config));
-			console.log("Language set: " + config.name + " (" + config.locale + ")");
 			Pebble.sendAppMessage({
-				action: "language_changed",
+				action: ACTION_LANGUAGE_CHANGED,
 				language: config.locale
 			});
+			console.log("Language set: " + config.name + " (" + config.locale + ")");
 		}
 	} catch (err) {
 		console.log("Config error: " + err);
@@ -93,30 +92,31 @@ Pebble.addEventListener("webviewclosed", function (e) {
 
 Pebble.addEventListener("appmessage", function (e) {
 	const payload = e.payload;
-	const lang = getStoredLanguage();
 
-	if (payload.action === "fetch") {
-		fetchDailyTextFromWol(payload.date, lang, function (result) {
+	if (payload.action === ACTION_FETCH) {
+		const locale = payload.language || "en";
+		fetchDailyTextFromWol(payload.date, locale, function (result) {
 			if (result.error) {
 				Pebble.sendAppMessage({
-					action: "fetch_error",
+					action: ACTION_FETCH_ERROR,
 					date: payload.date,
 					error: result.error
 				});
 			} else {
 				Pebble.sendAppMessage({
-					action: "fetch_result",
+					action: ACTION_FETCH_RESULT,
 					date: result.date,
 					ref: result.ref,
 					text: result.text,
-					commentary: result.commentary
+					commentary: result.commentary,
+					language: locale
 				});
 			}
 		});
 		return;
 	}
 
-	if (payload.action === "open_config") {
+	if (payload.action === ACTION_OPEN_CONFIG) {
 		Pebble.showConfiguration();
 	}
 });
