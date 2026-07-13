@@ -24,6 +24,7 @@
       "commentary",
       "error",
       "language",
+      "lib",
       "year",
       "month",
       "month_entry_date",
@@ -32,7 +33,8 @@
       "month_entry_commentary",
       "month_total",
       "month_index",
-      "cache_days"
+      "cache_days",
+      "rsconf"
     ],
     "resources": {
       "media": []

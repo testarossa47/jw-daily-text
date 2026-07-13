@@ -8,6 +8,8 @@
 #define KEY_COMMENTARY MESSAGE_KEY_commentary
 #define KEY_ERROR MESSAGE_KEY_error
 #define KEY_LANGUAGE MESSAGE_KEY_language
+#define KEY_LIB MESSAGE_KEY_lib
+#define KEY_RSCONF MESSAGE_KEY_rsconf
 #define KEY_CACHE_DAYS MESSAGE_KEY_cache_days
 #define KEY_YEAR MESSAGE_KEY_year
 #define KEY_MONTH MESSAGE_KEY_month
@@ -20,6 +22,8 @@
 
 #define PERSIST_KEY_LANGUAGE 1
 #define PERSIST_KEY_CACHE_DAYS 2
+#define PERSIST_KEY_LIB 3
+#define PERSIST_KEY_RSCONF 4
 #define MAX_CACHE_DAYS 14
 
 typedef struct {
@@ -50,6 +54,8 @@ static int s_current_month;
 static DisplayMode s_mode;
 static bool s_waiting_for_phone;
 static char s_language[8];
+static char s_lib[16];
+static char s_rsconf[8];
 static int s_cache_days;
 
 static DayEntry s_cache[MAX_CACHE_DAYS];
@@ -233,6 +239,8 @@ static void request_from_phone(void) {
     dict_write_int32(iter, KEY_ACTION, ACTION_FETCH);
     dict_write_cstring(iter, KEY_DATE, date_str);
     dict_write_cstring(iter, KEY_LANGUAGE, s_language);
+    dict_write_cstring(iter, KEY_LIB, s_lib);
+    dict_write_cstring(iter, KEY_RSCONF, s_rsconf);
     dict_write_int32(iter, KEY_CACHE_DAYS, s_cache_days);
     app_message_outbox_send();
 }
@@ -295,11 +303,23 @@ static void inbox_received_handler(DictionaryIterator *iter, void *context) {
         layer_mark_dirty(text_layer_get_layer(s_body_layer));
     } else if (action == ACTION_LANGUAGE_CHANGED) {
         Tuple *lang_t = dict_find(iter, KEY_LANGUAGE);
+        Tuple *lib_t = dict_find(iter, KEY_LIB);
+        Tuple *rsconf_t = dict_find(iter, KEY_RSCONF);
         Tuple *cd_t = dict_find(iter, KEY_CACHE_DAYS);
         if (lang_t) {
             strncpy(s_language, lang_t->value->cstring, sizeof(s_language) - 1);
             s_language[sizeof(s_language) - 1] = '\0';
             persist_write_string(PERSIST_KEY_LANGUAGE, s_language);
+        }
+        if (lib_t) {
+            strncpy(s_lib, lib_t->value->cstring, sizeof(s_lib) - 1);
+            s_lib[sizeof(s_lib) - 1] = '\0';
+            persist_write_string(PERSIST_KEY_LIB, s_lib);
+        }
+        if (rsconf_t) {
+            strncpy(s_rsconf, rsconf_t->value->cstring, sizeof(s_rsconf) - 1);
+            s_rsconf[sizeof(s_rsconf) - 1] = '\0';
+            persist_write_string(PERSIST_KEY_RSCONF, s_rsconf);
         }
         if (cd_t) {
             s_cache_days = cd_t->value->int32;
@@ -390,6 +410,20 @@ static void init(void) {
     } else {
         strncpy(s_language, "en", sizeof(s_language) - 1);
         s_language[sizeof(s_language) - 1] = '\0';
+    }
+
+    if (persist_exists(PERSIST_KEY_LIB)) {
+        persist_read_string(PERSIST_KEY_LIB, s_lib, sizeof(s_lib));
+    } else {
+        strncpy(s_lib, "lp-e", sizeof(s_lib) - 1);
+        s_lib[sizeof(s_lib) - 1] = '\0';
+    }
+
+    if (persist_exists(PERSIST_KEY_RSCONF)) {
+        persist_read_string(PERSIST_KEY_RSCONF, s_rsconf, sizeof(s_rsconf));
+    } else {
+        strncpy(s_rsconf, "1", sizeof(s_rsconf) - 1);
+        s_rsconf[sizeof(s_rsconf) - 1] = '\0';
     }
 
     if (persist_exists(PERSIST_KEY_CACHE_DAYS)) {
