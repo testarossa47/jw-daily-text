@@ -8,7 +8,7 @@
   "dependencies": {},
   "pebble": {
     "displayName": "Daily Text",
-    "uuid": "2ef1f7ac-6869-4742-9b4e-901fa550c1ae",
+    "uuid": "ecca2ec3-068b-4cff-a500-a27184c1b841",
     "sdkVersion": "3",
     "enableMultiJS": true,
     "targetPlatforms": ["emery"],

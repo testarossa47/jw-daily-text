@@ -73,54 +73,108 @@ function saveState() {
 	} catch (e) {}
 }
 
-function fetchFromWol(dateStr, callback) {
-	var parts = dateStr.split("-");
-	var url = "https://wol.jw.org/" + currentLocale + "/wol/dt/r" + currentRsconf + "/" + currentLib + "/" +
-		parseInt(parts[0]) + "/" + parseInt(parts[1]) + "/" + parseInt(parts[2]);
+function findRsconf(locale, lib, callback) {
+	var cached = localStorage.getItem(LS_PREFIX + "_rsconf:" + locale);
+	if (cached) {
+		callback(cached);
+		return;
+	}
+	if (KNOWN_RSCONF[locale]) {
+		localStorage.setItem(LS_PREFIX + "_rsconf:" + locale, KNOWN_RSCONF[locale]);
+		callback(KNOWN_RSCONF[locale]);
+		return;
+	}
+	var today = new Date();
+	var year = today.getFullYear();
+	var month = today.getMonth() + 1;
+	var day = today.getDate();
 
-	var req = new XMLHttpRequest();
-	req.open("GET", url, true);
-	req.timeout = 15000;
-	req.onload = function () {
-		if (req.status !== 200) {
-			callback({ error: "HTTP " + req.status });
+	function tryRsconf(rsconf) {
+		if (rsconf > 20) {
+			callback("1");
 			return;
 		}
-		var html = req.responseText;
-		var themeMatch = html.match(/<p[^>]*class="themeScrp"[^>]*>([\s\S]*?)<\/p>/);
-		if (!themeMatch) { callback({ error: "No themeScrp found" }); return; }
-		var themeHtml = themeMatch[1];
-		var refMatch = themeHtml.match(/<a[^>]*>([\s\S]*?)<\/a>/);
-		var ref = refMatch ? stripTags(refMatch[1]) : "";
-		var emMatches = themeHtml.match(/<em>([\s\S]*?)<\/em>/g) || [];
-		var textParts = [];
-		for (var i = 0; i < emMatches.length; i++) {
-			var inner = emMatches[i].replace(/<\/?em>/g, "").replace(/<a[^>]*>[\s\S]*?<\/a>/, "").trim();
-			var cleaned = stripTags(inner);
-			if (cleaned && cleaned.indexOf(ref.replace(/\s+/g, " ").trim()) === -1) {
-				textParts.push(cleaned);
-			}
+		if (locale !== currentLocale) {
+			callback(null);
+			return;
 		}
-		var text = textParts.join(" ").replace(/,+$/, "").trim();
-		var bodyMatch = html.match(/<div class="bodyTxt">([\s\S]*?)<\/div>/);
-		var commentary = "";
-		if (bodyMatch) {
-			var pMatch = bodyMatch[1].match(/<p[^>]*>([\s\S]*?)<\/p>/);
-			if (pMatch) {
-				commentary = stripTags(pMatch[1]);
-				var dash = commentary.lastIndexOf("\u2014");
-				if (dash > 0) commentary = commentary.substring(0, dash).trim();
-				commentary = commentary.replace(/\s*\.\s*$/, "");
+		var url = "https://wol.jw.org/" + locale + "/wol/dt/r" + rsconf + "/" + lib + "/" + year + "/" + month + "/" + day;
+		var req = new XMLHttpRequest();
+		req.open("GET", url, true);
+		req.timeout = 5000;
+		req.onload = function() {
+			if (req.status === 200) {
+				localStorage.setItem(LS_PREFIX + "_rsconf:" + locale, String(rsconf));
+				callback(String(rsconf));
+			} else {
+				tryRsconf(rsconf + 1);
 			}
+		};
+		req.onerror = function() { tryRsconf(rsconf + 1); };
+		req.ontimeout = function() { tryRsconf(rsconf + 1); };
+		req.send();
+	}
+	tryRsconf(1);
+}
+
+function fetchFromWol(dateStr, callback) {
+	findRsconf(currentLocale, currentLib, function(rsconf) {
+		if (rsconf === null) {
+			callback({ error: "Language changed" });
+			return;
 		}
-		var result = { date: dateStr, ref: ref, text: text, commentary: commentary };
-		var entry = { ref: ref, text: text, commentary: commentary };
-		setCache(dateStr, entry);
-		callback({ result: result });
-	};
-	req.onerror = function () { callback({ error: "Network error" }); };
-	req.ontimeout = function () { callback({ error: "Timeout" }); };
-	req.send();
+		if (rsconf !== currentRsconf) {
+			currentRsconf = rsconf;
+			saveState();
+		}
+		var parts = dateStr.split("-");
+		var url = "https://wol.jw.org/" + currentLocale + "/wol/dt/r" + currentRsconf + "/" + currentLib + "/" +
+			parseInt(parts[0]) + "/" + parseInt(parts[1]) + "/" + parseInt(parts[2]);
+
+		var req = new XMLHttpRequest();
+		req.open("GET", url, true);
+		req.timeout = 15000;
+		req.onload = function () {
+			if (req.status !== 200) {
+				callback({ error: "HTTP " + req.status });
+				return;
+			}
+			var html = req.responseText;
+			var themeMatch = html.match(/<p[^>]*class="themeScrp"[^>]*>([\s\S]*?)<\/p>/);
+			if (!themeMatch) { callback({ error: "No themeScrp found" }); return; }
+			var themeHtml = themeMatch[1];
+			var refMatch = themeHtml.match(/<a[^>]*>([\s\S]*?)<\/a>/);
+			var ref = refMatch ? stripTags(refMatch[1]) : "";
+			var emMatches = themeHtml.match(/<em>([\s\S]*?)<\/em>/g) || [];
+			var textParts = [];
+			for (var i = 0; i < emMatches.length; i++) {
+				var inner = emMatches[i].replace(/<\/?em>/g, "").replace(/<a[^>]*>[\s\S]*?<\/a>/, "").trim();
+				var cleaned = stripTags(inner);
+				if (cleaned && cleaned.indexOf(ref.replace(/\s+/g, " ").trim()) === -1) {
+					textParts.push(cleaned);
+				}
+			}
+			var text = textParts.join(" ").replace(/,+$/, "").trim();
+			var bodyMatch = html.match(/<div class="bodyTxt">([\s\S]*?)<\/div>/);
+			var commentary = "";
+			if (bodyMatch) {
+				var pMatch = bodyMatch[1].match(/<p[^>]*>([\s\S]*?)<\/p>/);
+				if (pMatch) {
+					commentary = stripTags(pMatch[1]);
+					var dash = commentary.lastIndexOf("\u2014");
+					if (dash > 0) commentary = commentary.substring(0, dash).trim();
+					commentary = commentary.replace(/\s*\.\s*$/, "");
+				}
+			}
+			var result = { date: dateStr, ref: ref, text: text, commentary: commentary };
+			var entry = { ref: ref, text: text, commentary: commentary };
+			setCache(dateStr, entry);
+			callback({ result: result });
+		};
+		req.onerror = function () { callback({ error: "Network error" }); };
+		req.ontimeout = function () { callback({ error: "Timeout" }); };
+		req.send();
+	});
 }
 
 function getDay(dateStr, callback) {
@@ -188,7 +242,14 @@ function startYearlyImport(stopIfRunning) {
 Pebble.addEventListener("ready", function () {
 	loadState();
 	console.log("JW Daily Text ready: " + currentLocale + " " + currentLib + " r" + currentRsconf);
-	startYearlyImport(false);
+	findRsconf(currentLocale, currentLib, function(rsconf) {
+		if (rsconf && rsconf !== currentRsconf) {
+			currentRsconf = rsconf;
+			saveState();
+			console.log("Updated rsconf to: " + rsconf);
+		}
+		startYearlyImport(false);
+	});
 });
 
 Pebble.addEventListener("showConfiguration", function () {
@@ -203,21 +264,24 @@ Pebble.addEventListener("webviewclosed", function (e) {
 			var oldLocale = currentLocale;
 			currentLocale = config.locale;
 			currentLib = config.lib;
-			currentRsconf = config.rsconf || KNOWN_RSCONF[config.locale] || "1";
 			cacheDays = config.cacheDays || 7;
 			if (cacheDays < 1) cacheDays = 1;
 			if (cacheDays > 14) cacheDays = 14;
-			saveState();
 			if (currentLocale !== oldLocale) {
 				clearLocaleCache();
 			}
-			Pebble.sendAppMessage({
-				action: ACTION_LANGUAGE_CHANGED,
-				language: currentLocale, lib: currentLib, rsconf: currentRsconf, cache_days: cacheDays
+			findRsconf(currentLocale, currentLib, function(rsconf) {
+				if (rsconf === null) return;
+				currentRsconf = rsconf;
+				saveState();
+				Pebble.sendAppMessage({
+					action: ACTION_LANGUAGE_CHANGED,
+					language: currentLocale, lib: currentLib, rsconf: currentRsconf, cache_days: cacheDays
+				});
+				startYearlyImport(true);
+				setTimeout(function () { startYearlyImport(false); }, 500);
+				console.log("Language: " + config.name + " (" + currentLocale + " " + currentLib + " r" + currentRsconf + ")");
 			});
-			startYearlyImport(true);
-			setTimeout(function () { startYearlyImport(false); }, 500);
-			console.log("Language: " + config.name + " (" + currentLocale + " " + currentLib + " r" + currentRsconf + ")");
 		}
 	} catch (err) { console.log("Config error: " + err); }
 });
@@ -229,24 +293,30 @@ Pebble.addEventListener("appmessage", function (e) {
 	var locale = payload.language || currentLocale;
 	currentLocale = locale;
 	currentLib = payload.lib || currentLib;
-	currentRsconf = payload.rsconf || KNOWN_RSCONF[locale] || currentRsconf;
+	cacheDays = payload.cache_days || cacheDays;
 	saveState();
 
-	var parts = payload.date.split("-");
-	var year = parseInt(parts[0]);
-	var month = parseInt(parts[1]);
-	var day = parseInt(parts[2]);
-	var totalDays = daysInMonth(year, month);
+	findRsconf(currentLocale, currentLib, function(rsconf) {
+		if (rsconf === null) return;
+		currentRsconf = rsconf;
+		saveState();
 
-	getDay(payload.date, function (res) {
-		if (res.error) {
-			Pebble.sendAppMessage({ action: ACTION_FETCH_ERROR, date: payload.date, error: res.error });
-			return;
-		}
-		sendResult(res.result.date, res.result.ref, res.result.text, res.result.commentary);
-		var preFetchEnd = Math.min(day + cacheDays - 1, totalDays);
-		if (day + 1 <= preFetchEnd) {
-			setTimeout(function () { preFetchDays(year, month, day + 1, preFetchEnd); }, 300);
-		}
+		var parts = payload.date.split("-");
+		var year = parseInt(parts[0]);
+		var month = parseInt(parts[1]);
+		var day = parseInt(parts[2]);
+		var totalDays = daysInMonth(year, month);
+
+		getDay(payload.date, function (res) {
+			if (res.error) {
+				Pebble.sendAppMessage({ action: ACTION_FETCH_ERROR, date: payload.date, error: res.error });
+				return;
+			}
+			sendResult(res.result.date, res.result.ref, res.result.text, res.result.commentary);
+			var preFetchEnd = Math.min(day + cacheDays - 1, totalDays);
+			if (day + 1 <= preFetchEnd) {
+				setTimeout(function () { preFetchDays(year, month, day + 1, preFetchEnd); }, 300);
+			}
+		});
 	});
 });
