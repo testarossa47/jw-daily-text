@@ -4,7 +4,6 @@ const ACTION_FETCH = 1;
 const ACTION_FETCH_RESULT = 2;
 const ACTION_FETCH_ERROR = 3;
 const ACTION_LANGUAGE_CHANGED = 4;
-const ACTION_OPEN_CONFIG = 5;
 
 function stripTags(text) {
 	return text.replace(/<[^>]+>/g, "").replace(/\s+/g, " ").replace(/\u200b/g, "").trim();
@@ -12,6 +11,10 @@ function stripTags(text) {
 
 function getLib(locale) {
 	return locale === "en" ? "lp-e" : "lfb-" + locale;
+}
+
+function daysInMonth(y, m) {
+	return new Date(y, m, 0).getDate();
 }
 
 function fetchDailyTextFromWol(dateStr, locale, callback) {
@@ -51,7 +54,7 @@ function fetchDailyTextFromWol(dateStr, locale, callback) {
 		const bodyMatch = html.match(/<div class="bodyTxt">([\s\S]*?)<\/div>/);
 		let commentary = "";
 		if (bodyMatch) {
-			const pMatch = bodyMatch[1].match(/<p[^>]*class="[^"]*p\d+[^"]*"[^>]*>([\s\S]*?)<\/p>/);
+			const pMatch = bodyMatch[1].match(/<p[^>]*>([\s\S]*?)<\/p>/);
 			if (pMatch) {
 				commentary = stripTags(pMatch[1]);
 				const dash = commentary.lastIndexOf("\u2014");
@@ -66,12 +69,39 @@ function fetchDailyTextFromWol(dateStr, locale, callback) {
 	req.send();
 }
 
+function sendResult(date, locale, ref, text, commentary) {
+	Pebble.sendAppMessage({
+		action: ACTION_FETCH_RESULT,
+		date: date,
+		ref: ref,
+		text: text,
+		commentary: commentary,
+		language: locale
+	});
+}
+
+function preFetchDays(year, month, startDay, endDay, locale) {
+	if (startDay > endDay) return;
+	const dateStr = year + "-" + ("0" + month).slice(-2) + "-" + ("0" + startDay).toString().slice(-2);
+	fetchDailyTextFromWol(dateStr, locale, function (result) {
+		if (!result.error) {
+			sendResult(result.date, locale, result.ref, result.text, result.commentary);
+		}
+		const next = startDay + 1;
+		if (next <= endDay) {
+			setTimeout(function () {
+				preFetchDays(year, month, next, endDay, locale);
+			}, 300);
+		}
+	});
+}
+
 Pebble.addEventListener("ready", function () {
 	console.log("JW Daily Text phone proxy ready");
 });
 
 Pebble.addEventListener("showConfiguration", function () {
-	Pebble.openURL(CONFIG_URL);
+	Pebble.openURL(CONFIG_URL + "?v=" + Date.now());
 });
 
 Pebble.addEventListener("webviewclosed", function (e) {
@@ -81,7 +111,8 @@ Pebble.addEventListener("webviewclosed", function (e) {
 		if (config && config.locale && config.lib) {
 			Pebble.sendAppMessage({
 				action: ACTION_LANGUAGE_CHANGED,
-				language: config.locale
+				language: config.locale,
+				cache_days: config.cacheDays || 7
 			});
 			console.log("Language set: " + config.name + " (" + config.locale + ")");
 		}
@@ -95,6 +126,13 @@ Pebble.addEventListener("appmessage", function (e) {
 
 	if (payload.action === ACTION_FETCH) {
 		const locale = payload.language || "en";
+		const parts = payload.date.split("-");
+		const year = parseInt(parts[0]);
+		const month = parseInt(parts[1]);
+		const day = parseInt(parts[2]);
+		const totalDays = daysInMonth(year, month);
+		const cacheDays = payload.cache_days || 7;
+
 		fetchDailyTextFromWol(payload.date, locale, function (result) {
 			if (result.error) {
 				Pebble.sendAppMessage({
@@ -103,20 +141,15 @@ Pebble.addEventListener("appmessage", function (e) {
 					error: result.error
 				});
 			} else {
-				Pebble.sendAppMessage({
-					action: ACTION_FETCH_RESULT,
-					date: result.date,
-					ref: result.ref,
-					text: result.text,
-					commentary: result.commentary,
-					language: locale
-				});
+				sendResult(result.date, locale, result.ref, result.text, result.commentary);
+
+				const preFetchEnd = Math.min(day + cacheDays - 1, totalDays);
+				if (day + 1 <= preFetchEnd) {
+					setTimeout(function () {
+						preFetchDays(year, month, day + 1, preFetchEnd, locale);
+					}, 300);
+				}
 			}
 		});
-		return;
-	}
-
-	if (payload.action === ACTION_OPEN_CONFIG) {
-		Pebble.showConfiguration();
 	}
 });

@@ -72,6 +72,30 @@ h1 {
   margin-top: 2px;
 }
 #list li.selected .sub { color: #cde; }
+#cache-section {
+  margin: 12px 0;
+  padding: 10px 14px;
+  background: #f9f9f9;
+  border-radius: 8px;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+#cache-section label {
+  font-size: 14px;
+  color: #555;
+  flex: 1;
+}
+#cache-days {
+  width: 60px;
+  padding: 6px 8px;
+  font-size: 16px;
+  border: 1px solid #ccc;
+  border-radius: 6px;
+  text-align: center;
+  outline: none;
+}
+#cache-days:focus { border-color: #799fcc; }
 #save-bar {
   position: fixed;
   bottom: 0;
@@ -115,6 +139,10 @@ h1 {
 <input type="text" id="search" placeholder="Search languages..." autocomplete="off">
 <div id="count"></div>
 <ul id="list"></ul>
+<div id="cache-section">
+  <label for="cache-days">Offline days (1&#8211;14):</label>
+  <input type="number" id="cache-days" min="1" max="14" value="7">
+</div>
 <div id="status"></div>
 
 <div id="save-bar">
@@ -175,7 +203,16 @@ function saveSelection() {
     return;
   }
 
-  const data = JSON.stringify({ locale: selectedLocale, lib: selectedLib, name: selectedName });
+  let cacheDays = parseInt(document.getElementById("cache-days").value, 10);
+  if (isNaN(cacheDays) || cacheDays < 1) cacheDays = 1;
+  if (cacheDays > 14) cacheDays = 14;
+
+  const data = JSON.stringify({
+    locale: selectedLocale,
+    lib: selectedLib,
+    name: selectedName,
+    cacheDays: cacheDays
+  });
 
   let saved = false;
   try {

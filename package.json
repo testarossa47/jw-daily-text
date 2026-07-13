@@ -31,7 +31,8 @@
       "month_entry_text",
       "month_entry_commentary",
       "month_total",
-      "month_index"
+      "month_index",
+      "cache_days"
     ],
     "resources": {
       "media": []

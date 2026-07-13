@@ -8,6 +8,7 @@
 #define KEY_COMMENTARY MESSAGE_KEY_commentary
 #define KEY_ERROR MESSAGE_KEY_error
 #define KEY_LANGUAGE MESSAGE_KEY_language
+#define KEY_CACHE_DAYS MESSAGE_KEY_cache_days
 #define KEY_YEAR MESSAGE_KEY_year
 #define KEY_MONTH MESSAGE_KEY_month
 #define KEY_MONTH_ENTRY_DATE MESSAGE_KEY_month_entry_date
@@ -18,10 +19,20 @@
 #define KEY_MONTH_INDEX MESSAGE_KEY_month_index
 
 #define PERSIST_KEY_LANGUAGE 1
+#define PERSIST_KEY_CACHE_DAYS 2
+#define MAX_CACHE_DAYS 14
+
+typedef struct {
+    bool has_data;
+    char ref[128];
+    char text[512];
+    char commentary[512];
+} DayEntry;
 
 static const int ACTION_FETCH = 1;
 static const int ACTION_FETCH_RESULT = 2;
 static const int ACTION_FETCH_ERROR = 3;
+static const int ACTION_LANGUAGE_CHANGED = 4;
 
 typedef enum { MODE_VERSE, MODE_COMMENTARY } DisplayMode;
 
@@ -39,11 +50,16 @@ static int s_current_month;
 static DisplayMode s_mode;
 static bool s_waiting_for_phone;
 static char s_language[8];
+static int s_cache_days;
 
-static char s_remote_ref[256];
-static char s_remote_text[2048];
-static char s_remote_commentary[2048];
-static bool s_has_remote_entry;
+static DayEntry s_cache[MAX_CACHE_DAYS];
+
+static DayEntry *current_entry(void) {
+    if (s_current_day >= 1 && s_current_day <= s_days_in_month) {
+        return &s_cache[s_current_day - 1];
+    }
+    return NULL;
+}
 
 static void update_ui(void);
 static void request_from_phone(void);
@@ -66,7 +82,7 @@ static void tick_handler(struct tm *tick_time, TimeUnits units_changed) {
         s_current_month = tick_time->tm_mon + 1;
         s_current_day = tick_time->tm_mday;
         s_days_in_month = days_in_month(s_current_year, s_current_month);
-        s_has_remote_entry = false;
+        for (int i = 0; i < MAX_CACHE_DAYS; i++) s_cache[i].has_data = false;
         s_waiting_for_phone = false;
         s_mode = MODE_VERSE;
         update_ui();
@@ -95,10 +111,13 @@ static void line_layer_update(Layer *layer, GContext *ctx) {
 }
 
 static void select_click_handler(ClickRecognizerRef recognizer, void *context) {
-    if (!s_has_remote_entry) {
-        s_waiting_for_phone = true;
-        update_ui();
-        request_from_phone();
+    DayEntry *e = current_entry();
+    if (!e || !e->has_data) {
+        if (!s_waiting_for_phone) {
+            s_waiting_for_phone = true;
+            update_ui();
+            request_from_phone();
+        }
         return;
     }
     s_mode = (s_mode == MODE_VERSE) ? MODE_COMMENTARY : MODE_VERSE;
@@ -115,11 +134,16 @@ static void up_click_handler(ClickRecognizerRef recognizer, void *context) {
         scroll_layer_set_content_offset(s_scroll_layer, GPoint(0, new_y), true);
     } else if (s_current_day > 1) {
         s_current_day--;
-        s_has_remote_entry = false;
-        s_waiting_for_phone = true;
         s_mode = MODE_VERSE;
-        update_ui();
-        request_from_phone();
+        DayEntry *e = current_entry();
+        if (e && e->has_data) {
+            scroll_layer_set_content_offset(s_scroll_layer, GPoint(0, 0), false);
+            update_ui();
+        } else {
+            s_waiting_for_phone = true;
+            update_ui();
+            request_from_phone();
+        }
     }
 }
 
@@ -134,11 +158,16 @@ static void down_click_handler(ClickRecognizerRef recognizer, void *context) {
         scroll_layer_set_content_offset(s_scroll_layer, GPoint(0, new_y), true);
     } else if (s_current_day < s_days_in_month) {
         s_current_day++;
-        s_has_remote_entry = false;
-        s_waiting_for_phone = true;
         s_mode = MODE_VERSE;
-        update_ui();
-        request_from_phone();
+        DayEntry *e = current_entry();
+        if (e && e->has_data) {
+            scroll_layer_set_content_offset(s_scroll_layer, GPoint(0, 0), false);
+            update_ui();
+        } else {
+            s_waiting_for_phone = true;
+            update_ui();
+            request_from_phone();
+        }
     }
 }
 
@@ -170,7 +199,8 @@ static void update_ui(void) {
         return;
     }
 
-    if (!s_has_remote_entry) {
+    DayEntry *e = current_entry();
+    if (!e || !e->has_data) {
         text_layer_set_text(s_ref_layer, "");
         text_layer_set_text(s_body_layer, "No data available.\nPress SELECT to retry.");
         scroll_layer_set_content_size(s_scroll_layer, GSize(192, 200));
@@ -178,13 +208,13 @@ static void update_ui(void) {
         return;
     }
 
-    text_layer_set_text(s_ref_layer, s_remote_ref);
+    text_layer_set_text(s_ref_layer, e->ref);
 
-    static char body_text[2048];
+    static char body_text[514];
     if (s_mode == MODE_VERSE) {
-        snprintf(body_text, sizeof(body_text), "\"%s\"", s_remote_text);
+        snprintf(body_text, sizeof(body_text), "\"%s\"", e->text);
     } else {
-        snprintf(body_text, sizeof(body_text), "%s", s_remote_commentary);
+        snprintf(body_text, sizeof(body_text), "%s", e->commentary);
     }
     text_layer_set_text(s_body_layer, body_text);
 
@@ -203,7 +233,22 @@ static void request_from_phone(void) {
     dict_write_int32(iter, KEY_ACTION, ACTION_FETCH);
     dict_write_cstring(iter, KEY_DATE, date_str);
     dict_write_cstring(iter, KEY_LANGUAGE, s_language);
+    dict_write_int32(iter, KEY_CACHE_DAYS, s_cache_days);
     app_message_outbox_send();
+}
+
+static int parse_day_from_date(const char *s) {
+    int year = 0, month = 0, day = 0;
+    int part = 0;
+    for (; *s; s++) {
+        if (*s == '-') { part++; continue; }
+        if (*s < '0' || *s > '9') return -1;
+        int d = *s - '0';
+        if (part == 0) year = year * 10 + d;
+        else if (part == 1) month = month * 10 + d;
+        else if (part == 2) day = day * 10 + d;
+    }
+    return (part == 2 && day >= 1) ? day : -1;
 }
 
 static void inbox_received_handler(DictionaryIterator *iter, void *context) {
@@ -213,17 +258,25 @@ static void inbox_received_handler(DictionaryIterator *iter, void *context) {
     int action = action_t->value->int32;
 
     if (action == ACTION_FETCH_RESULT) {
+        Tuple *date_t = dict_find(iter, KEY_DATE);
         Tuple *ref_t = dict_find(iter, KEY_REF);
         Tuple *text_t = dict_find(iter, KEY_TEXT);
         Tuple *comm_t = dict_find(iter, KEY_COMMENTARY);
-        if (ref_t && text_t && comm_t) {
-            strncpy(s_remote_ref, ref_t->value->cstring, sizeof(s_remote_ref) - 1);
-            s_remote_ref[sizeof(s_remote_ref) - 1] = '\0';
-            strncpy(s_remote_text, text_t->value->cstring, sizeof(s_remote_text) - 1);
-            s_remote_text[sizeof(s_remote_text) - 1] = '\0';
-            strncpy(s_remote_commentary, comm_t->value->cstring, sizeof(s_remote_commentary) - 1);
-            s_remote_commentary[sizeof(s_remote_commentary) - 1] = '\0';
-            s_has_remote_entry = true;
+        if (!date_t || !ref_t || !text_t || !comm_t) return;
+
+        int day = parse_day_from_date(date_t->value->cstring);
+        if (day < 1 || day > s_days_in_month) return;
+
+        DayEntry *e = &s_cache[day - 1];
+        strncpy(e->ref, ref_t->value->cstring, sizeof(e->ref) - 1);
+        e->ref[sizeof(e->ref) - 1] = '\0';
+        strncpy(e->text, text_t->value->cstring, sizeof(e->text) - 1);
+        e->text[sizeof(e->text) - 1] = '\0';
+        strncpy(e->commentary, comm_t->value->cstring, sizeof(e->commentary) - 1);
+        e->commentary[sizeof(e->commentary) - 1] = '\0';
+        e->has_data = true;
+
+        if (day == s_current_day) {
             s_waiting_for_phone = false;
             scroll_layer_set_content_offset(s_scroll_layer, GPoint(0, 0), false);
             update_ui();
@@ -233,16 +286,24 @@ static void inbox_received_handler(DictionaryIterator *iter, void *context) {
         text_layer_set_text(s_ref_layer, "");
         text_layer_set_text(s_body_layer, "Failed to load.\nPress SELECT to retry.");
         layer_mark_dirty(text_layer_get_layer(s_body_layer));
-    } else if (action == 4) {
+    } else if (action == ACTION_LANGUAGE_CHANGED) {
         Tuple *lang_t = dict_find(iter, KEY_LANGUAGE);
+        Tuple *cd_t = dict_find(iter, KEY_CACHE_DAYS);
         if (lang_t) {
             strncpy(s_language, lang_t->value->cstring, sizeof(s_language) - 1);
             s_language[sizeof(s_language) - 1] = '\0';
             persist_write_string(PERSIST_KEY_LANGUAGE, s_language);
-            s_has_remote_entry = false;
-            s_waiting_for_phone = false;
-            update_ui();
         }
+        if (cd_t) {
+            s_cache_days = cd_t->value->int32;
+            if (s_cache_days < 1) s_cache_days = 1;
+            if (s_cache_days > MAX_CACHE_DAYS) s_cache_days = MAX_CACHE_DAYS;
+            persist_write_int(PERSIST_KEY_CACHE_DAYS, s_cache_days);
+        }
+        for (int i = 0; i < MAX_CACHE_DAYS; i++) s_cache[i].has_data = false;
+        s_waiting_for_phone = true;
+        update_ui();
+        request_from_phone();
     }
 }
 
@@ -264,31 +325,31 @@ static void window_load(Window *window) {
     Layer *root = window_get_root_layer(window);
     GRect bounds = layer_get_bounds(root);
 
-    s_date_layer = text_layer_create(GRect(4, 4, bounds.size.w - 8, 30));
-    text_layer_set_font(s_date_layer, fonts_get_system_font(FONT_KEY_GOTHIC_24_BOLD));
+    s_date_layer = text_layer_create(GRect(4, 4, bounds.size.w - 8, 34));
+    text_layer_set_font(s_date_layer, fonts_get_system_font(FONT_KEY_GOTHIC_28_BOLD));
     text_layer_set_text_alignment(s_date_layer, GTextAlignmentCenter);
     text_layer_set_text_color(s_date_layer, GColorBlack);
     text_layer_set_background_color(s_date_layer, GColorClear);
     layer_add_child(root, text_layer_get_layer(s_date_layer));
 
-    s_line_layer = layer_create(GRect(4, 36, bounds.size.w - 8, 2));
+    s_line_layer = layer_create(GRect(4, 40, bounds.size.w - 8, 2));
     layer_set_update_proc(s_line_layer, line_layer_update);
     layer_add_child(root, s_line_layer);
 
-    s_ref_layer = text_layer_create(GRect(4, 42, bounds.size.w - 8, 28));
-    text_layer_set_font(s_ref_layer, fonts_get_system_font(FONT_KEY_GOTHIC_18_BOLD));
+    s_ref_layer = text_layer_create(GRect(4, 44, bounds.size.w - 8, 30));
+    text_layer_set_font(s_ref_layer, fonts_get_system_font(FONT_KEY_GOTHIC_24_BOLD));
     text_layer_set_text_alignment(s_ref_layer, GTextAlignmentCenter);
     text_layer_set_text_color(s_ref_layer, GColorBlack);
     text_layer_set_background_color(s_ref_layer, GColorClear);
     layer_add_child(root, text_layer_get_layer(s_ref_layer));
 
     s_body_layer = text_layer_create(GRect(0, 0, bounds.size.w - 8, 3000));
-    text_layer_set_font(s_body_layer, fonts_get_system_font(FONT_KEY_GOTHIC_24));
+    text_layer_set_font(s_body_layer, fonts_get_system_font(FONT_KEY_GOTHIC_28));
     text_layer_set_text_color(s_body_layer, GColorBlack);
     text_layer_set_background_color(s_body_layer, GColorClear);
     text_layer_set_overflow_mode(s_body_layer, GTextOverflowModeWordWrap);
 
-    s_scroll_layer = scroll_layer_create(GRect(4, 74, bounds.size.w - 8, bounds.size.h - 74));
+    s_scroll_layer = scroll_layer_create(GRect(4, 78, bounds.size.w - 8, bounds.size.h - 78));
     scroll_layer_add_child(s_scroll_layer, text_layer_get_layer(s_body_layer));
     scroll_layer_set_paging(s_scroll_layer, false);
     layer_add_child(root, scroll_layer_get_layer(s_scroll_layer));
@@ -314,7 +375,8 @@ static void init(void) {
     s_days_in_month = days_in_month(s_current_year, s_current_month);
     s_mode = MODE_VERSE;
     s_waiting_for_phone = false;
-    s_has_remote_entry = false;
+
+    for (int i = 0; i < MAX_CACHE_DAYS; i++) s_cache[i].has_data = false;
 
     if (persist_exists(PERSIST_KEY_LANGUAGE)) {
         persist_read_string(PERSIST_KEY_LANGUAGE, s_language, sizeof(s_language));
@@ -322,6 +384,14 @@ static void init(void) {
         strncpy(s_language, "en", sizeof(s_language) - 1);
         s_language[sizeof(s_language) - 1] = '\0';
     }
+
+    if (persist_exists(PERSIST_KEY_CACHE_DAYS)) {
+        s_cache_days = persist_read_int(PERSIST_KEY_CACHE_DAYS);
+    } else {
+        s_cache_days = 7;
+    }
+    if (s_cache_days < 1) s_cache_days = 1;
+    if (s_cache_days > MAX_CACHE_DAYS) s_cache_days = MAX_CACHE_DAYS;
 
     tick_timer_service_subscribe(MINUTE_UNIT, tick_handler);
 
