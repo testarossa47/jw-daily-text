@@ -422,7 +422,15 @@ static void init(void) {
     if (persist_exists(PERSIST_KEY_RSCONF)) {
         persist_read_string(PERSIST_KEY_RSCONF, s_rsconf, sizeof(s_rsconf));
     } else {
-        strncpy(s_rsconf, "1", sizeof(s_rsconf) - 1);
+        if (strncmp(s_language, "de", 2) == 0) {
+            strncpy(s_rsconf, "10", sizeof(s_rsconf) - 1);
+        } else if (strncmp(s_language, "es", 2) == 0) {
+            strncpy(s_rsconf, "4", sizeof(s_rsconf) - 1);
+        } else if (strncmp(s_language, "ja", 2) == 0) {
+            strncpy(s_rsconf, "7", sizeof(s_rsconf) - 1);
+        } else {
+            strncpy(s_rsconf, "1", sizeof(s_rsconf) - 1);
+        }
         s_rsconf[sizeof(s_rsconf) - 1] = '\0';
     }
 
