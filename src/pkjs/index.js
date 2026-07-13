@@ -5,6 +5,8 @@ const ACTION_FETCH_RESULT = 2;
 const ACTION_FETCH_ERROR = 3;
 const ACTION_LANGUAGE_CHANGED = 4;
 
+let currentLocale = "en";
+
 function stripTags(text) {
 	return text.replace(/<[^>]+>/g, "").replace(/\s+/g, " ").replace(/\u200b/g, "").trim();
 }
@@ -101,7 +103,7 @@ Pebble.addEventListener("ready", function () {
 });
 
 Pebble.addEventListener("showConfiguration", function () {
-	Pebble.openURL(CONFIG_URL + "?v=" + Date.now());
+	Pebble.openURL(CONFIG_URL + "?v=" + Date.now() + "&locale=" + currentLocale + "&lib=" + getLib(currentLocale));
 });
 
 Pebble.addEventListener("webviewclosed", function (e) {
@@ -109,6 +111,7 @@ Pebble.addEventListener("webviewclosed", function (e) {
 	try {
 		const config = JSON.parse(decodeURIComponent(e.response));
 		if (config && config.locale && config.lib) {
+			currentLocale = config.locale;
 			Pebble.sendAppMessage({
 				action: ACTION_LANGUAGE_CHANGED,
 				language: config.locale,
@@ -126,6 +129,7 @@ Pebble.addEventListener("appmessage", function (e) {
 
 	if (payload.action === ACTION_FETCH) {
 		const locale = payload.language || "en";
+		currentLocale = locale;
 		const parts = payload.date.split("-");
 		const year = parseInt(parts[0]);
 		const month = parseInt(parts[1]);

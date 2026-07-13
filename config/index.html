@@ -238,6 +238,20 @@ function saveSelection() {
   }
 }
 
+function getParams() {
+  const p = new URLSearchParams(window.location.search);
+  return { locale: p.get("locale"), lib: p.get("lib") };
+}
+
+const params = getParams();
+if (params.locale && params.lib) {
+  const found = LANGUAGES.find(l => l.locale === params.locale);
+  if (found) {
+    selectedLocale = found.locale;
+    selectedLib = found.lib;
+    selectedName = found.name;
+  }
+}
 showCurrent();
 renderList("");
 

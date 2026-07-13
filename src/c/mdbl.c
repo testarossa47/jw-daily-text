@@ -283,8 +283,15 @@ static void inbox_received_handler(DictionaryIterator *iter, void *context) {
         }
     } else if (action == ACTION_FETCH_ERROR) {
         s_waiting_for_phone = false;
+        Tuple *err_t = dict_find(iter, KEY_ERROR);
+        static char err_msg[128];
+        if (err_t) {
+            snprintf(err_msg, sizeof(err_msg), "Fetch error: %s\nSELECT to retry.", err_t->value->cstring);
+        } else {
+            snprintf(err_msg, sizeof(err_msg), "Failed to load.\nPress SELECT to retry.");
+        }
         text_layer_set_text(s_ref_layer, "");
-        text_layer_set_text(s_body_layer, "Failed to load.\nPress SELECT to retry.");
+        text_layer_set_text(s_body_layer, err_msg);
         layer_mark_dirty(text_layer_get_layer(s_body_layer));
     } else if (action == ACTION_LANGUAGE_CHANGED) {
         Tuple *lang_t = dict_find(iter, KEY_LANGUAGE);
