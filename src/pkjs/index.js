@@ -3,6 +3,7 @@ var ACTION_FETCH = 1;
 var ACTION_FETCH_RESULT = 2;
 var ACTION_FETCH_ERROR = 3;
 var ACTION_LANGUAGE_CHANGED = 4;
+var ACTION_SYNC_RANGE = 5;
 var KNOWN_RSCONF = { "de": "10", "es": "4", "ja": "7" };
 var LS_PREFIX = "dt.";
 
@@ -193,6 +194,37 @@ function sendResult(dateStr, ref, text, commentary) {
 	});
 }
 
+function sendDateRange(startDate, endDate) {
+	var current = new Date(startDate);
+	var end = new Date(endDate);
+	
+	function sendNext() {
+		if (current > end) return;
+		
+		var year = current.getFullYear();
+		var month = current.getMonth() + 1;
+		var day = current.getDate();
+		var dateStr = year + "-" + ("0" + month).slice(-2) + "-" + ("0" + day).slice(-2);
+		
+		var cached = getCached(dateStr);
+		if (cached) {
+			sendResult(dateStr, cached.ref, cached.text, cached.commentary);
+			current.setDate(current.getDate() + 1);
+			setTimeout(sendNext, 100);
+		} else {
+			getDay(dateStr, function (res) {
+				if (res.result) {
+					sendResult(res.result.date, res.result.ref, res.result.text, res.result.commentary);
+				}
+				current.setDate(current.getDate() + 1);
+				setTimeout(sendNext, 300);
+			});
+		}
+	}
+	
+	sendNext();
+}
+
 function preFetchDays(year, month, startDay, endDay) {
 	if (startDay > endDay) return;
 	var dateStr = year + "-" + ("0" + month).slice(-2) + "-" + ("0" + startDay).toString().slice(-2);
@@ -228,7 +260,12 @@ function startYearlyImport(stopIfRunning) {
 	function importNext(idx) {
 		if (importStopped || idx >= dates.length) { importRunning = false; return; }
 		var dateStr = dates[idx];
-		if (getCached(dateStr)) { importNext(idx + 1); return; }
+		var cached = getCached(dateStr);
+		if (cached) {
+			sendResult(dateStr, cached.ref, cached.text, cached.commentary);
+			setTimeout(function () { importNext(idx + 1); }, 100);
+			return;
+		}
 		getDay(dateStr, function (res) {
 			if (res.result) {
 				sendResult(res.result.date, res.result.ref, res.result.text, res.result.commentary);
@@ -288,6 +325,14 @@ Pebble.addEventListener("webviewclosed", function (e) {
 
 Pebble.addEventListener("appmessage", function (e) {
 	var payload = e.payload;
+	if (payload.action === ACTION_SYNC_RANGE) {
+		var startDate = payload.start_date;
+		var endDate = payload.end_date;
+		if (startDate && endDate) {
+			sendDateRange(startDate, endDate);
+		}
+		return;
+	}
 	if (payload.action !== ACTION_FETCH) return;
 
 	var locale = payload.language || currentLocale;
