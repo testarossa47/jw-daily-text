@@ -482,7 +482,8 @@ static void request_bulk_sync(const char *start_date) {
     add_days_to_date(year, month, day, FUTURE_DAYS_PREFETCH, end_date, sizeof(end_date));
     
     DictionaryIterator *iter;
-    if (app_message_outbox_begin(&iter) == APP_MSG_OK) {
+    AppMessageResult result = app_message_outbox_begin(&iter);
+    if (result == APP_MSG_OK) {
         dict_write_int32(iter, KEY_ACTION, ACTION_SYNC_RANGE);
         dict_write_cstring(iter, KEY_START_DATE, start_date);
         dict_write_cstring(iter, KEY_END_DATE, end_date);
@@ -491,7 +492,10 @@ static void request_bulk_sync(const char *start_date) {
         dict_write_cstring(iter, KEY_RSCONF, s_rsconf);
         app_message_outbox_send();
     } else {
+        APP_LOG(APP_LOG_LEVEL_ERROR, "Bulk sync outbox begin failed: %d", result);
         s_sync_in_progress = false;
+        s_waiting_for_phone = false;
+        update_ui();
     }
 }
 
@@ -511,8 +515,17 @@ static void request_from_phone(void) {
         return;
     }
 
+    s_waiting_for_phone = true;
+    update_ui();
+
     DictionaryIterator *iter;
-    app_message_outbox_begin(&iter);
+    AppMessageResult result = app_message_outbox_begin(&iter);
+    if (result != APP_MSG_OK) {
+        APP_LOG(APP_LOG_LEVEL_ERROR, "Fetch outbox begin failed: %d", result);
+        s_waiting_for_phone = false;
+        update_ui();
+        return;
+    }
     dict_write_int32(iter, KEY_ACTION, ACTION_FETCH);
     dict_write_cstring(iter, KEY_DATE, date_str);
     dict_write_cstring(iter, KEY_LANGUAGE, s_language);
@@ -582,15 +595,23 @@ static void inbox_received_handler(DictionaryIterator *iter, void *context) {
         }
     } else if (action == ACTION_FETCH_ERROR) {
         s_waiting_for_phone = false;
-        Tuple *err_t = dict_find(iter, KEY_ERROR);
-        static char err_msg[128];
-        if (err_t) {
-            snprintf(err_msg, sizeof(err_msg), "Fetch error: %s\nSELECT to retry.", err_t->value->cstring);
+        DayEntry *e = current_entry();
+        if (e && e->has_data) {
+            update_ui();
         } else {
-            snprintf(err_msg, sizeof(err_msg), "Failed to load.\nPress SELECT to retry.");
+            Tuple *err_t = dict_find(iter, KEY_ERROR);
+            static char err_msg[128];
+            if (err_t) {
+                snprintf(err_msg, sizeof(err_msg), "Fetch error: %s\nSELECT to retry.", err_t->value->cstring);
+            } else {
+                snprintf(err_msg, sizeof(err_msg), "Failed to load.\nPress SELECT to retry.");
+            }
+            text_layer_set_text(s_body_layer, err_msg);
+            scroll_layer_set_content_size(s_scroll_layer, GSize(192, 200));
+            layer_set_hidden(s_bottom_arrow_layer, true);
+            layer_set_hidden(s_next_bar, true);
+            layer_mark_dirty(text_layer_get_layer(s_body_layer));
         }
-        text_layer_set_text(s_body_layer, err_msg);
-        layer_mark_dirty(text_layer_get_layer(s_body_layer));
     } else if (action == ACTION_LANGUAGE_CHANGED) {
         Tuple *lang_t = dict_find(iter, KEY_LANGUAGE);
         Tuple *lib_t = dict_find(iter, KEY_LIB);
@@ -627,13 +648,15 @@ static void inbox_received_handler(DictionaryIterator *iter, void *context) {
 
 static void inbox_dropped_handler(AppMessageResult reason, void *context) {
     APP_LOG(APP_LOG_LEVEL_ERROR, "Inbox dropped: %d", reason);
+    s_waiting_for_phone = false;
+    update_ui();
 }
 
 static void outbox_failed_handler(DictionaryIterator *iter, AppMessageResult reason, void *context) {
     APP_LOG(APP_LOG_LEVEL_ERROR, "Outbox failed: %d", reason);
     s_waiting_for_phone = false;
-    text_layer_set_text(s_body_layer, "Phone not connected.\nPress BACK to exit.");
-    layer_mark_dirty(text_layer_get_layer(s_body_layer));
+    s_sync_in_progress = false;
+    update_ui();
 }
 
 static void outbox_sent_handler(DictionaryIterator *iter, void *context) {
