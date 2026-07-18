@@ -31,7 +31,8 @@
 #define CACHE_SIZE 25
 #define PAST_DAYS_KEEP 7
 #define FUTURE_DAYS_PREFETCH 14
-#define SCROLL_INCREMENT 48
+#define SCROLL_INCREMENT 36
+#define SCROLL_REPEAT_INTERVAL_MS 220
 #define ARROW_HEIGHT 19
 #define BANNER_HEIGHT 36
 
@@ -73,6 +74,10 @@ static int s_cache_days;
 
 static DayEntry s_cache[CACHE_SIZE];
 static bool s_sync_in_progress = false;
+static Animation *s_scroll_animation = NULL;
+static int s_scroll_anim_start_y = 0;
+static int s_scroll_anim_target_y = 0;
+static AnimationImplementation s_scroll_anim_impl;
 
 static DayEntry *current_entry(void) {
     char date_str[11];
@@ -204,6 +209,7 @@ static void request_from_phone(void);
 static void load_previous_day(void);
 static void reset_scroll_to_top(void);
 static void prv_update_indicators(ScrollLayer *scroll_layer, void *context);
+static void swap_down_complete(Animation *animation, bool finished, void *context);
 
 static int estimate_text_height(const char *text) {
     int chars_per_line = 15;
@@ -332,7 +338,37 @@ static void select_click_handler(ClickRecognizerRef recognizer, void *context) {
     }
 }
 
-static void up_click_handler(ClickRecognizerRef recognizer, void *context) {
+static void scroll_anim_update(Animation *animation, const AnimationProgress progress) {
+    int current_y = s_scroll_anim_start_y +
+        ((s_scroll_anim_target_y - s_scroll_anim_start_y) * (int)progress) / ANIMATION_NORMALIZED_MAX;
+    scroll_layer_set_content_offset(s_scroll_layer, GPoint(0, current_y), false);
+}
+
+static void scroll_anim_stopped(Animation *animation, bool finished, void *context) {
+    s_scroll_animation = NULL;
+}
+
+static void animate_scroll_to(int target_y) {
+    if (s_scroll_animation) {
+        animation_unschedule(s_scroll_animation);
+        s_scroll_animation = NULL;
+    }
+    GPoint current = scroll_layer_get_content_offset(s_scroll_layer);
+    s_scroll_anim_start_y = current.y;
+    s_scroll_anim_target_y = target_y;
+
+    s_scroll_anim_impl.update = scroll_anim_update;
+    s_scroll_animation = animation_create();
+    animation_set_implementation(s_scroll_animation, &s_scroll_anim_impl);
+    animation_set_duration(s_scroll_animation, SCROLL_REPEAT_INTERVAL_MS);
+    animation_set_curve(s_scroll_animation, AnimationCurveLinear);
+    animation_set_handlers(s_scroll_animation, (AnimationHandlers) {
+        .stopped = scroll_anim_stopped
+    }, NULL);
+    animation_schedule(s_scroll_animation);
+}
+
+static void scroll_up_one_step(void) {
     GPoint offset = scroll_layer_get_content_offset(s_scroll_layer);
     
     if (offset.y >= 0) {
@@ -340,34 +376,11 @@ static void up_click_handler(ClickRecognizerRef recognizer, void *context) {
     } else {
         int new_y = offset.y + SCROLL_INCREMENT;
         if (new_y > 0) new_y = 0;
-        scroll_layer_set_content_offset(s_scroll_layer, GPoint(0, new_y), true);
+        animate_scroll_to(new_y);
     }
 }
 
-static void swap_down_complete(Animation *animation, bool finished, void *context) {
-    s_swap_in_progress = false;
-    if (!finished) return;
-    
-    s_current_day++;
-    if (s_current_day > s_days_in_month) { s_current_day = s_days_in_month; return; }
-    
-    DayEntry *e = current_entry();
-    if (!e || !e->has_data) {
-        s_waiting_for_phone = true;
-    }
-    
-    GRect scroll_frame = layer_get_frame(scroll_layer_get_layer(s_scroll_layer));
-    int scroll_w = scroll_frame.size.w;
-    layer_set_frame(text_layer_get_layer(s_body_layer), GRect(0, 0, scroll_w, 8000));
-    layer_set_frame(s_next_bar, GRect(0, 0, scroll_w, BANNER_HEIGHT));
-    
-    update_ui();
-    scroll_layer_set_content_offset(s_scroll_layer, GPoint(0, 0), false);
-}
-
-static void down_click_handler(ClickRecognizerRef recognizer, void *context) {
-    if (s_swap_in_progress) return;
-    
+static void scroll_down_one_step(void) {
     GPoint offset = scroll_layer_get_content_offset(s_scroll_layer);
     GSize content = scroll_layer_get_content_size(s_scroll_layer);
     GRect frame = layer_get_frame(scroll_layer_get_layer(s_scroll_layer));
@@ -378,6 +391,11 @@ static void down_click_handler(ClickRecognizerRef recognizer, void *context) {
         
         int body_h = text_layer_get_content_size(s_body_layer).h + 4;
         s_swap_in_progress = true;
+        
+        if (s_scroll_animation) {
+            animation_unschedule(s_scroll_animation);
+            s_scroll_animation = NULL;
+        }
         
         GRect body_from = layer_get_frame(text_layer_get_layer(s_body_layer));
         GRect body_to = body_from;
@@ -403,8 +421,45 @@ static void down_click_handler(ClickRecognizerRef recognizer, void *context) {
     } else {
         int new_y = offset.y - SCROLL_INCREMENT;
         if (new_y < max_scroll) new_y = max_scroll;
-        scroll_layer_set_content_offset(s_scroll_layer, GPoint(0, new_y), true);
+        animate_scroll_to(new_y);
     }
+}
+
+static void swap_down_complete(Animation *animation, bool finished, void *context) {
+    s_swap_in_progress = false;
+    if (!finished) return;
+    
+    s_current_day++;
+    if (s_current_day > s_days_in_month) { s_current_day = s_days_in_month; return; }
+    
+    DayEntry *e = current_entry();
+    if (!e || !e->has_data) {
+        s_waiting_for_phone = true;
+    }
+    
+    GRect scroll_frame = layer_get_frame(scroll_layer_get_layer(s_scroll_layer));
+    int scroll_w = scroll_frame.size.w;
+    layer_set_frame(text_layer_get_layer(s_body_layer), GRect(0, 0, scroll_w, 8000));
+    layer_set_frame(s_next_bar, GRect(0, 0, scroll_w, BANNER_HEIGHT));
+    
+    update_ui();
+    scroll_layer_set_content_offset(s_scroll_layer, GPoint(0, 0), false);
+}
+
+static void up_click_handler(ClickRecognizerRef recognizer, void *context) {
+    if (s_swap_in_progress) return;
+    
+    if (click_recognizer_is_repeating(recognizer)) {
+        GPoint offset = scroll_layer_get_content_offset(s_scroll_layer);
+        if (offset.y >= 0) return;
+    }
+    
+    scroll_up_one_step();
+}
+
+static void down_click_handler(ClickRecognizerRef recognizer, void *context) {
+    if (s_swap_in_progress) return;
+    scroll_down_one_step();
 }
 
 static void back_click_handler(ClickRecognizerRef recognizer, void *context) {
@@ -413,8 +468,8 @@ static void back_click_handler(ClickRecognizerRef recognizer, void *context) {
 
 static void click_config_provider(void *context) {
     window_single_click_subscribe(BUTTON_ID_SELECT, select_click_handler);
-    window_single_click_subscribe(BUTTON_ID_UP, up_click_handler);
-    window_single_click_subscribe(BUTTON_ID_DOWN, down_click_handler);
+    window_single_repeating_click_subscribe(BUTTON_ID_UP, SCROLL_REPEAT_INTERVAL_MS, up_click_handler);
+    window_single_repeating_click_subscribe(BUTTON_ID_DOWN, SCROLL_REPEAT_INTERVAL_MS, down_click_handler);
     window_single_click_subscribe(BUTTON_ID_BACK, back_click_handler);
 }
 
@@ -709,6 +764,10 @@ static void window_load(Window *window) {
 }
 
 static void window_unload(Window *window) {
+    if (s_scroll_animation) {
+        animation_unschedule(s_scroll_animation);
+        s_scroll_animation = NULL;
+    }
     text_layer_destroy(s_body_layer);
     scroll_layer_destroy(s_scroll_layer);
     layer_destroy(s_banner_layer);
