@@ -4,7 +4,7 @@ var ACTION_FETCH_RESULT = 2;
 var ACTION_FETCH_ERROR = 3;
 var ACTION_LANGUAGE_CHANGED = 4;
 var ACTION_SYNC_RANGE = 5;
-var KNOWN_RSCONF = { "de": "10", "es": "4", "ja": "7" };
+var KNOWN_RSCONF = { "en": "1", "de": "10", "es": "4", "ja": "7" };
 var LS_PREFIX = "dt.";
 
 var currentLocale = "en";

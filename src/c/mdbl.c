@@ -39,6 +39,7 @@
 #define REVEAL_ANIM_DURATION_MS 260
 #define LOADING_FILL_DURATION_MS 2400
 #define LOADING_DONE_DURATION_MS 180
+#define TOUCH_SWAP_THRESHOLD 30
 
 #define COLOR_BANNER PBL_IF_COLOR_ELSE(GColorVividViolet, GColorDarkGray)
 #define COLOR_BANNER_TEXT GColorWhite
@@ -651,6 +652,51 @@ static void back_click_handler(ClickRecognizerRef recognizer, void *context) {
     window_stack_pop(true);
 }
 
+static bool s_touch_active;
+static int16_t s_touch_start_y;
+static int s_touch_start_offset;
+static int s_touch_raw_offset;
+
+static void touch_handler(const TouchEvent *event, void *context) {
+    if (s_swap_in_progress) return;
+
+    GRect scroll_frame = layer_get_frame(scroll_layer_get_layer(s_scroll_layer));
+    GSize content = scroll_layer_get_content_size(s_scroll_layer);
+    int max_scroll = -(content.h - scroll_frame.size.h);
+    if (max_scroll > 0) max_scroll = 0;
+
+    if (event->type == TouchEvent_Touchdown) {
+        if (event->y < scroll_frame.origin.y ||
+            event->y > scroll_frame.origin.y + scroll_frame.size.h) {
+            return;
+        }
+        if (s_scroll_animation) {
+            animation_unschedule(s_scroll_animation);
+            s_scroll_animation = NULL;
+        }
+        s_touch_active = true;
+        s_touch_start_y = event->y;
+        s_touch_start_offset = scroll_layer_get_content_offset(s_scroll_layer).y;
+        s_touch_raw_offset = s_touch_start_offset;
+    } else if (event->type == TouchEvent_PositionUpdate) {
+        if (!s_touch_active) return;
+        int raw = s_touch_start_offset + ((int)s_touch_start_y - event->y);
+        s_touch_raw_offset = raw;
+        int clamped = raw;
+        if (clamped > 0) clamped = 0;
+        if (clamped < max_scroll) clamped = max_scroll;
+        scroll_layer_set_content_offset(s_scroll_layer, GPoint(0, clamped), false);
+    } else if (event->type == TouchEvent_Liftoff) {
+        if (!s_touch_active) return;
+        s_touch_active = false;
+        if (s_touch_raw_offset < max_scroll - TOUCH_SWAP_THRESHOLD) {
+            scroll_down_one_step();
+        } else if (s_touch_raw_offset > TOUCH_SWAP_THRESHOLD) {
+            scroll_up_one_step();
+        }
+    }
+}
+
 static void click_config_provider(void *context) {
     window_single_click_subscribe(BUTTON_ID_SELECT, select_click_handler);
     window_single_repeating_click_subscribe(BUTTON_ID_UP, SCROLL_REPEAT_INTERVAL_MS, up_click_handler);
@@ -973,6 +1019,11 @@ static void window_load(Window *window) {
     layer_add_child(root, s_bottom_arrow_layer);
 
     window_set_background_color(window, GColorWhite);
+
+    if (touch_service_is_enabled()) {
+        touch_service_subscribe(touch_handler, NULL);
+    }
+
     update_ui();
 }
 
@@ -980,6 +1031,9 @@ static void window_unload(Window *window) {
     if (s_scroll_animation) {
         animation_unschedule(s_scroll_animation);
         s_scroll_animation = NULL;
+    }
+    if (touch_service_is_enabled()) {
+        touch_service_unsubscribe();
     }
     loading_cancel();
     if (s_temp_bar) {
@@ -1073,3 +1127,4 @@ int main(void) {
     app_event_loop();
     deinit();
 }
+
