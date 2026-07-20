@@ -35,6 +35,15 @@
 #define SCROLL_REPEAT_INTERVAL_MS 220
 #define ARROW_HEIGHT 19
 #define BANNER_HEIGHT 36
+#define SWAP_ANIM_DURATION_MS 220
+#define REVEAL_ANIM_DURATION_MS 260
+#define LOADING_FILL_DURATION_MS 2400
+#define LOADING_DONE_DURATION_MS 180
+
+#define COLOR_BANNER PBL_IF_COLOR_ELSE(GColorVividViolet, GColorDarkGray)
+#define COLOR_BANNER_TEXT GColorWhite
+#define COLOR_NEXT_BAR PBL_IF_COLOR_ELSE(GColorBlueMoon, GColorLightGray)
+#define COLOR_NEXT_BAR_TEXT GColorBlack
 
 typedef struct {
     bool has_data;
@@ -59,6 +68,12 @@ static Layer *s_bottom_arrow_layer;
 static StatusBarLayer *s_status_bar;
 static Layer *s_next_bar;
 static char s_next_bar_text[36];
+static Layer *s_temp_bar;
+static char s_temp_bar_text[36];
+static Layer *s_loading_layer;
+static bool s_loading_active;
+static int s_loading_progress;
+static Animation *s_loading_animation;
 static bool s_swap_in_progress;
 static int s_screen_height;
 
@@ -223,6 +238,9 @@ static void load_previous_day(void);
 static void reset_scroll_to_top(void);
 static void prv_update_indicators(ScrollLayer *scroll_layer, void *context);
 static void swap_down_complete(Animation *animation, bool finished, void *context);
+static void swap_up_complete(Animation *animation, bool finished, void *context);
+static void loading_start(void);
+static void loading_cancel(void);
 
 static int days_in_month(int year, int month) {
     if (month == 2) {
@@ -267,15 +285,40 @@ static void prv_format_date_str(char *buf, int size, int y, int m, int d) {
     snprintf(buf, size, "%s %s %d%s", day_name, mon, d, sfx);
 }
 
-static void banner_update_proc(Layer *layer, GContext *ctx) {
-    GRect bounds = layer_get_bounds(layer);
-    graphics_context_set_fill_color(ctx, GColorDarkGray);
+static void draw_bar(GContext *ctx, GRect bounds, const char *text,
+                     GColor bg, GColor fg, GFont font) {
+    graphics_context_set_fill_color(ctx, bg);
     graphics_fill_rect(ctx, bounds, 0, GCornerNone);
-    graphics_context_set_text_color(ctx, GColorWhite);
-    GFont font = fonts_get_system_font(FONT_KEY_GOTHIC_28_BOLD);
-    graphics_draw_text(ctx, s_banner_text, font, 
+    graphics_context_set_text_color(ctx, fg);
+    graphics_draw_text(ctx, text, font,
                        GRect(8, 0, bounds.size.w - 16, bounds.size.h),
                        GTextOverflowModeWordWrap, GTextAlignmentCenter, NULL);
+}
+
+static void banner_update_proc(Layer *layer, GContext *ctx) {
+    draw_bar(ctx, layer_get_bounds(layer), s_banner_text,
+             COLOR_BANNER, COLOR_BANNER_TEXT,
+             fonts_get_system_font(FONT_KEY_GOTHIC_28_BOLD));
+}
+
+static void temp_bar_update_proc(Layer *layer, GContext *ctx) {
+    draw_bar(ctx, layer_get_bounds(layer), s_temp_bar_text,
+             COLOR_BANNER, COLOR_BANNER_TEXT,
+             fonts_get_system_font(FONT_KEY_GOTHIC_28_BOLD));
+}
+
+static void loading_update_proc(Layer *layer, GContext *ctx) {
+    GRect bounds = layer_get_bounds(layer);
+    int bar_w = bounds.size.w - 48;
+    int x = 24;
+    int y = bounds.size.h / 2 - 3;
+    graphics_context_set_fill_color(ctx, GColorLightGray);
+    graphics_fill_rect(ctx, GRect(x, y, bar_w, 6), 3, GCornersAll);
+    int fill = bar_w * s_loading_progress / 100;
+    if (fill > 0) {
+        graphics_context_set_fill_color(ctx, COLOR_BANNER);
+        graphics_fill_rect(ctx, GRect(x, y, fill, 6), fill < 6 ? fill / 2 : 3, GCornersAll);
+    }
 }
 
 static void bottom_arrow_update_proc(Layer *layer, GContext *ctx) {
@@ -291,13 +334,9 @@ static void bottom_arrow_update_proc(Layer *layer, GContext *ctx) {
 }
 
 static void next_bar_update_proc(Layer *layer, GContext *ctx) {
-    GRect bounds = layer_get_bounds(layer);
-    graphics_context_set_fill_color(ctx, GColorLightGray);
-    graphics_fill_rect(ctx, bounds, 0, GCornerNone);
-    graphics_context_set_text_color(ctx, GColorBlack);
-    GFont font = fonts_get_system_font(FONT_KEY_GOTHIC_24_BOLD);
-    graphics_draw_text(ctx, s_next_bar_text, font, bounds,
-                       GTextOverflowModeWordWrap, GTextAlignmentCenter, NULL);
+    draw_bar(ctx, layer_get_bounds(layer), s_next_bar_text,
+             COLOR_NEXT_BAR, COLOR_NEXT_BAR_TEXT,
+             fonts_get_system_font(FONT_KEY_GOTHIC_24_BOLD));
 }
 
 static void prv_update_indicators(ScrollLayer *scroll_layer, void *context) {
@@ -316,20 +355,135 @@ static void reset_scroll_to_top(void) {
     scroll_layer_set_content_offset(s_scroll_layer, GPoint(0, 0), true);
 }
 
+static void reveal_body(void) {
+    GRect to = layer_get_frame(text_layer_get_layer(s_body_layer));
+    GRect from = to;
+    from.origin.y += 24;
+    PropertyAnimation *pa = property_animation_create_layer_frame(
+        text_layer_get_layer(s_body_layer), &from, &to);
+    Animation *a = property_animation_get_animation(pa);
+    animation_set_duration(a, REVEAL_ANIM_DURATION_MS);
+    animation_set_curve(a, AnimationCurveEaseOut);
+    animation_schedule(a);
+}
+
+static int s_loading_anim_start;
+static int s_loading_anim_target;
+static AnimationImplementation s_loading_anim_impl;
+
+static void loading_anim_update(Animation *animation, const AnimationProgress progress) {
+    s_loading_progress = s_loading_anim_start +
+        ((s_loading_anim_target - s_loading_anim_start) * (int)progress) / ANIMATION_NORMALIZED_MAX;
+    layer_mark_dirty(s_loading_layer);
+}
+
+static void loading_anim_stopped(Animation *animation, bool finished, void *context) {
+    s_loading_animation = NULL;
+    if (finished && s_loading_anim_target >= 100 && s_loading_active) {
+        s_loading_active = false;
+        layer_set_hidden(s_loading_layer, true);
+        reveal_body();
+    }
+}
+
+static void loading_animate_to(int target, uint32_t duration) {
+    if (s_loading_animation) {
+        animation_unschedule(s_loading_animation);
+        s_loading_animation = NULL;
+    }
+    s_loading_anim_start = s_loading_progress;
+    s_loading_anim_target = target;
+    s_loading_anim_impl.update = loading_anim_update;
+    s_loading_animation = animation_create();
+    animation_set_implementation(s_loading_animation, &s_loading_anim_impl);
+    animation_set_duration(s_loading_animation, duration);
+    animation_set_curve(s_loading_animation, AnimationCurveEaseOut);
+    animation_set_handlers(s_loading_animation, (AnimationHandlers) {
+        .stopped = loading_anim_stopped
+    }, NULL);
+    animation_schedule(s_loading_animation);
+}
+
+static void loading_start(void) {
+    if (s_loading_active) return;
+    s_loading_active = true;
+    s_loading_progress = 0;
+    layer_set_hidden(s_loading_layer, false);
+    layer_mark_dirty(s_loading_layer);
+    loading_animate_to(92, LOADING_FILL_DURATION_MS);
+}
+
+static void loading_cancel(void) {
+    if (s_loading_animation) {
+        animation_unschedule(s_loading_animation);
+        s_loading_animation = NULL;
+    }
+    s_loading_active = false;
+    layer_set_hidden(s_loading_layer, true);
+}
+
+static void loading_finish(void) {
+    if (!s_loading_active) return;
+    loading_animate_to(100, LOADING_DONE_DURATION_MS);
+}
+
 static void load_previous_day(void) {
     if (s_current_day <= 1) return;
-    
-    s_current_day--;
-    DayEntry *e = current_entry();
-    if (e && e->has_data) {
-        reset_scroll_to_top();
-        update_ui();
-    } else {
+
+    char prev_date[11];
+    add_days_to_date(s_current_year, s_current_month, s_current_day, -1, prev_date, sizeof(prev_date));
+    DayEntry *e = find_cache_entry(prev_date);
+
+    if (!e) {
+        s_current_day--;
         s_waiting_for_phone = true;
         reset_scroll_to_top();
         update_ui();
         request_from_phone();
+        return;
     }
+
+    /* Animated swap: old date bar slides down off screen, new content slides in from top */
+    s_swap_in_progress = true;
+    if (s_scroll_animation) {
+        animation_unschedule(s_scroll_animation);
+        s_scroll_animation = NULL;
+    }
+
+    Layer *root = window_get_root_layer(s_window);
+    GRect root_bounds = layer_get_bounds(root);
+
+    snprintf(s_temp_bar_text, sizeof(s_temp_bar_text), "%s", s_banner_text);
+    s_temp_bar = layer_create(GRect(0, STATUS_BAR_LAYER_HEIGHT, root_bounds.size.w, BANNER_HEIGHT));
+    layer_set_update_proc(s_temp_bar, temp_bar_update_proc);
+    layer_add_child(root, s_temp_bar);
+
+    s_current_day--;
+    update_ui();
+    scroll_layer_set_content_offset(s_scroll_layer, GPoint(0, 0), false);
+
+    int body_h = layer_get_frame(text_layer_get_layer(s_body_layer)).size.h;
+    GRect body_to = layer_get_frame(text_layer_get_layer(s_body_layer));
+    GRect body_from = body_to;
+    body_from.origin.y = -body_h;
+    PropertyAnimation *body_anim = property_animation_create_layer_frame(
+        text_layer_get_layer(s_body_layer), &body_from, &body_to);
+
+    GRect bar_from = layer_get_frame(s_temp_bar);
+    GRect bar_to = bar_from;
+    bar_to.origin.y = root_bounds.size.h;
+    PropertyAnimation *bar_anim = property_animation_create_layer_frame(
+        s_temp_bar, &bar_from, &bar_to);
+
+    Animation *spawn = animation_spawn_create(
+        property_animation_get_animation(body_anim),
+        property_animation_get_animation(bar_anim), NULL);
+    animation_set_duration(spawn, SWAP_ANIM_DURATION_MS);
+    animation_set_curve(spawn, AnimationCurveEaseOut);
+    animation_set_handlers(spawn, (AnimationHandlers) {
+        .stopped = swap_up_complete,
+    }, NULL);
+    animation_schedule(spawn);
 }
 
 static void select_click_handler(ClickRecognizerRef recognizer, void *context) {
@@ -396,28 +550,38 @@ static void scroll_down_one_step(void) {
 
         int body_h = layer_get_frame(text_layer_get_layer(s_body_layer)).size.h;
         s_swap_in_progress = true;
-        
+
         if (s_scroll_animation) {
             animation_unschedule(s_scroll_animation);
             s_scroll_animation = NULL;
         }
-        
+
+        /* Reparent the next-day bar onto the root layer so it can slide up
+           over the scroll viewport and become the header bar. */
+        GRect scroll_frame = layer_get_frame(scroll_layer_get_layer(s_scroll_layer));
+        GRect bar_frame = layer_get_frame(s_next_bar);
+        int screen_y = scroll_frame.origin.y + bar_frame.origin.y + offset.y;
+
+        Layer *root = window_get_root_layer(s_window);
+        layer_remove_from_parent(s_next_bar);
+        layer_add_child(root, s_next_bar);
+        layer_set_frame(s_next_bar, GRect(0, screen_y, scroll_frame.size.w, BANNER_HEIGHT));
+
         GRect body_from = layer_get_frame(text_layer_get_layer(s_body_layer));
         GRect body_to = body_from;
         body_to.origin.y = -body_h;
         PropertyAnimation *body_anim = property_animation_create_layer_frame(
             text_layer_get_layer(s_body_layer), &body_from, &body_to);
-        
+
         GRect bar_from = layer_get_frame(s_next_bar);
-        GRect bar_to = bar_from;
-        bar_to.origin.y = 0;
+        GRect bar_to = GRect(0, STATUS_BAR_LAYER_HEIGHT, scroll_frame.size.w, BANNER_HEIGHT);
         PropertyAnimation *bar_anim = property_animation_create_layer_frame(
             s_next_bar, &bar_from, &bar_to);
-        
+
         Animation *spawn = animation_spawn_create(
             property_animation_get_animation(body_anim),
             property_animation_get_animation(bar_anim), NULL);
-        animation_set_duration(spawn, 200);
+        animation_set_duration(spawn, SWAP_ANIM_DURATION_MS);
         animation_set_curve(spawn, AnimationCurveEaseOut);
         animation_set_handlers(spawn, (AnimationHandlers) {
             .stopped = swap_down_complete,
@@ -432,23 +596,39 @@ static void scroll_down_one_step(void) {
 
 static void swap_down_complete(Animation *animation, bool finished, void *context) {
     s_swap_in_progress = false;
-    if (!finished) return;
-    
-    s_current_day++;
-    if (s_current_day > s_days_in_month) { s_current_day = s_days_in_month; return; }
-    
-    DayEntry *e = current_entry();
-    if (!e || !e->has_data) {
-        s_waiting_for_phone = true;
+
+    if (finished) {
+        s_current_day++;
+        if (s_current_day > s_days_in_month) s_current_day = s_days_in_month;
+
+        DayEntry *e = current_entry();
+        if (!e || !e->has_data) {
+            s_waiting_for_phone = true;
+        }
     }
-    
-    GRect scroll_frame = layer_get_frame(scroll_layer_get_layer(s_scroll_layer));
-    int scroll_w = scroll_frame.size.w;
-    layer_set_frame(text_layer_get_layer(s_body_layer), GRect(0, 0, scroll_w, 8000));
-    layer_set_frame(s_next_bar, GRect(0, 0, scroll_w, BANNER_HEIGHT));
-    
+
+    layer_remove_from_parent(s_next_bar);
+    scroll_layer_add_child(s_scroll_layer, s_next_bar);
+
     update_ui();
     scroll_layer_set_content_offset(s_scroll_layer, GPoint(0, 0), false);
+
+    if (s_waiting_for_phone) {
+        request_from_phone();
+    }
+}
+
+static void swap_up_complete(Animation *animation, bool finished, void *context) {
+    s_swap_in_progress = false;
+    if (s_temp_bar) {
+        layer_remove_from_parent(s_temp_bar);
+        layer_destroy(s_temp_bar);
+        s_temp_bar = NULL;
+    }
+    if (!finished) {
+        update_ui();
+        scroll_layer_set_content_offset(s_scroll_layer, GPoint(0, 0), false);
+    }
 }
 
 static void up_click_handler(ClickRecognizerRef recognizer, void *context) {
@@ -486,19 +666,25 @@ static void update_ui(void) {
     }
     layer_mark_dirty(s_banner_layer);
 
+    GRect scroll_frame = layer_get_frame(scroll_layer_get_layer(s_scroll_layer));
+    int scroll_w = scroll_frame.size.w;
+
     if (s_waiting_for_phone) {
-        text_layer_set_text(s_body_layer, "Loading...");
-        scroll_layer_set_content_size(s_scroll_layer, GSize(192, 200));
+        layer_set_hidden(text_layer_get_layer(s_body_layer), true);
+        scroll_layer_set_content_size(s_scroll_layer, GSize(scroll_w, scroll_frame.size.h));
         layer_set_hidden(s_bottom_arrow_layer, true);
         layer_set_hidden(s_next_bar, true);
-        layer_mark_dirty(text_layer_get_layer(s_body_layer));
+        loading_start();
         return;
     }
 
     DayEntry *e = current_entry();
     if (!e || !e->has_data) {
+        loading_cancel();
         text_layer_set_text(s_body_layer, "No data available.\nPress SELECT to retry.");
-        scroll_layer_set_content_size(s_scroll_layer, GSize(192, 200));
+        layer_set_frame(text_layer_get_layer(s_body_layer), GRect(4, 0, scroll_w - 8, 200));
+        layer_set_hidden(text_layer_get_layer(s_body_layer), false);
+        scroll_layer_set_content_size(s_scroll_layer, GSize(scroll_w, scroll_frame.size.h));
         layer_set_hidden(s_bottom_arrow_layer, true);
         layer_set_hidden(s_next_bar, true);
         layer_mark_dirty(text_layer_get_layer(s_body_layer));
@@ -510,13 +696,12 @@ static void update_ui(void) {
              e->ref, e->text, e->commentary);
     text_layer_set_text(s_body_layer, body_text);
 
-    GRect scroll_frame = layer_get_frame(scroll_layer_get_layer(s_scroll_layer));
-    int scroll_w = scroll_frame.size.w;
     GSize text_size = graphics_text_layout_get_content_size(
         body_text, fonts_get_system_font(FONT_KEY_GOTHIC_28),
-        GRect(0, 0, scroll_w, 8000), GTextOverflowModeWordWrap, GTextAlignmentLeft);
+        GRect(0, 0, scroll_w - 8, 8000), GTextOverflowModeWordWrap, GTextAlignmentLeft);
     int body_h = text_size.h + 4;
-    layer_set_frame(text_layer_get_layer(s_body_layer), GRect(0, 0, scroll_w, body_h));
+    layer_set_frame(text_layer_get_layer(s_body_layer), GRect(4, 0, scroll_w - 8, body_h));
+    layer_set_hidden(text_layer_get_layer(s_body_layer), false);
     layer_mark_dirty(text_layer_get_layer(s_body_layer));
 
     if (s_current_day < s_days_in_month) {
@@ -531,7 +716,15 @@ static void update_ui(void) {
         layer_set_hidden(s_next_bar, true);
         scroll_layer_set_content_size(s_scroll_layer, GSize(scroll_w, body_h));
     }
-    
+
+    if (s_loading_active) {
+        if (s_swap_in_progress) {
+            loading_cancel();
+        } else {
+            loading_finish();
+        }
+    }
+
     prv_update_indicators(s_scroll_layer, NULL);
 }
 
@@ -665,6 +858,7 @@ static void inbox_received_handler(DictionaryIterator *iter, void *context) {
         if (e && e->has_data) {
             update_ui();
         } else {
+            loading_cancel();
             Tuple *err_t = dict_find(iter, KEY_ERROR);
             static char err_msg[128];
             if (err_t) {
@@ -672,8 +866,11 @@ static void inbox_received_handler(DictionaryIterator *iter, void *context) {
             } else {
                 snprintf(err_msg, sizeof(err_msg), "Failed to load.\nPress SELECT to retry.");
             }
+            GRect scroll_frame = layer_get_frame(scroll_layer_get_layer(s_scroll_layer));
             text_layer_set_text(s_body_layer, err_msg);
-            scroll_layer_set_content_size(s_scroll_layer, GSize(192, 200));
+            layer_set_frame(text_layer_get_layer(s_body_layer), GRect(4, 0, scroll_frame.size.w - 8, 200));
+            layer_set_hidden(text_layer_get_layer(s_body_layer), false);
+            scroll_layer_set_content_size(s_scroll_layer, GSize(scroll_frame.size.w, scroll_frame.size.h));
             layer_set_hidden(s_bottom_arrow_layer, true);
             layer_set_hidden(s_next_bar, true);
             layer_mark_dirty(text_layer_get_layer(s_body_layer));
@@ -743,20 +940,20 @@ static void window_load(Window *window) {
     layer_set_update_proc(s_banner_layer, banner_update_proc);
     layer_add_child(root, s_banner_layer);
 
-    s_body_layer = text_layer_create(GRect(0, 0, bounds.size.w - 8, 8000));
+    s_body_layer = text_layer_create(GRect(4, 0, bounds.size.w - 8, 8000));
     text_layer_set_font(s_body_layer, fonts_get_system_font(FONT_KEY_GOTHIC_28));
     text_layer_set_text_color(s_body_layer, GColorBlack);
     text_layer_set_background_color(s_body_layer, GColorClear);
     text_layer_set_overflow_mode(s_body_layer, GTextOverflowModeWordWrap);
 
-    s_scroll_layer = scroll_layer_create(GRect(4, STATUS_BAR_LAYER_HEIGHT + BANNER_HEIGHT, bounds.size.w - 8, bounds.size.h - STATUS_BAR_LAYER_HEIGHT - BANNER_HEIGHT));
+    s_scroll_layer = scroll_layer_create(GRect(0, STATUS_BAR_LAYER_HEIGHT + BANNER_HEIGHT, bounds.size.w, bounds.size.h - STATUS_BAR_LAYER_HEIGHT - BANNER_HEIGHT));
     scroll_layer_add_child(s_scroll_layer, text_layer_get_layer(s_body_layer));
-    
-    s_next_bar = layer_create(GRect(0, 0, bounds.size.w - 8, BANNER_HEIGHT));
+
+    s_next_bar = layer_create(GRect(0, 0, bounds.size.w, BANNER_HEIGHT));
     layer_set_update_proc(s_next_bar, next_bar_update_proc);
     layer_set_hidden(s_next_bar, true);
     scroll_layer_add_child(s_scroll_layer, s_next_bar);
-    
+
     scroll_layer_set_paging(s_scroll_layer, false);
     scroll_layer_set_shadow_hidden(s_scroll_layer, true);
     scroll_layer_set_callbacks(s_scroll_layer, (ScrollLayerCallbacks) {
@@ -764,6 +961,11 @@ static void window_load(Window *window) {
     });
     scroll_layer_set_context(s_scroll_layer, NULL);
     layer_add_child(root, scroll_layer_get_layer(s_scroll_layer));
+
+    s_loading_layer = layer_create(GRect(0, STATUS_BAR_LAYER_HEIGHT + BANNER_HEIGHT, bounds.size.w, bounds.size.h - STATUS_BAR_LAYER_HEIGHT - BANNER_HEIGHT));
+    layer_set_update_proc(s_loading_layer, loading_update_proc);
+    layer_set_hidden(s_loading_layer, true);
+    layer_add_child(root, s_loading_layer);
 
     s_bottom_arrow_layer = layer_create(GRect(0, bounds.size.h - ARROW_HEIGHT, bounds.size.w, ARROW_HEIGHT));
     layer_set_update_proc(s_bottom_arrow_layer, bottom_arrow_update_proc);
@@ -779,11 +981,17 @@ static void window_unload(Window *window) {
         animation_unschedule(s_scroll_animation);
         s_scroll_animation = NULL;
     }
+    loading_cancel();
+    if (s_temp_bar) {
+        layer_destroy(s_temp_bar);
+        s_temp_bar = NULL;
+    }
     text_layer_destroy(s_body_layer);
     scroll_layer_destroy(s_scroll_layer);
     layer_destroy(s_banner_layer);
     layer_destroy(s_bottom_arrow_layer);
     layer_destroy(s_next_bar);
+    layer_destroy(s_loading_layer);
     status_bar_layer_destroy(s_status_bar);
 }
 
