@@ -1,11 +1,11 @@
-# Daily Text for Pebble
+# JW Daily Text for Pebble
 
 *Read today's Bible text and commentary on your Pebble smartwatch.*
 
-Daily Text brings the daily scripture and commentary from jw.org to your wrist.
-Open the app in the morning and the text is already there — the app prefetches
-the coming days in the background, so it keeps working even when your watch is
-away from your phone.
+JW Daily Text brings the daily scripture and commentary from jw.org to your
+wrist. Open the app in the morning and the text is already there — the app
+prefetches the coming days in the background, so it keeps working even when
+your watch is away from your phone.
 
 | Today | Next day preview | Translated UI |
 |---|---|---|
@@ -40,8 +40,9 @@ away from your phone.
 
 ## Install
 
-Install **Daily Text** from the Pebble app store (Rebble store) on your phone,
-or sideload the `.pbw` from the latest
+Install **JW Daily Text** from the
+[Pebble app store](https://apps.repebble.com/672b1221aeef4d30897a361c) on your
+phone, or sideload the `.pbw` from the latest
 [GitHub release](https://github.com/testarossa47/jw-daily-text/releases) with:
 
 ```sh
