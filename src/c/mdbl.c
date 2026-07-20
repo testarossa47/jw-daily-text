@@ -584,6 +584,7 @@ static void load_previous_day(void) {
     layer_add_child(root, s_temp_bar);
 
     s_current_day--;
+    s_waiting_for_phone = false;
     update_ui();
     scroll_layer_set_content_offset(s_scroll_layer, GPoint(0, 0), false);
 
@@ -727,9 +728,7 @@ static void swap_down_complete(Animation *animation, bool finished, void *contex
         if (s_current_day > s_days_in_month) s_current_day = s_days_in_month;
 
         DayEntry *e = current_entry();
-        if (!e || !e->has_data) {
-            s_waiting_for_phone = true;
-        }
+        s_waiting_for_phone = (!e || !e->has_data);
     }
 
     layer_remove_from_parent(s_next_bar);
