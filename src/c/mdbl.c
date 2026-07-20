@@ -140,6 +140,130 @@ static bool is_today(int year, int month, int day) {
            day == local->tm_mday;
 }
 
+typedef struct {
+    const char *today;
+    const char *no_data;
+    const char *fetch_error;
+    const char *load_failed;
+    const char *retry_hint;
+    const char *weekdays[7];   /* Monday .. Sunday */
+    const char *months[12];
+    int date_style;            /* 0: "Fri July 17th", 1: "Fr 17. Juli", 2: "Ven 17 juillet" */
+} LocaleStrings;
+
+static const LocaleStrings LOCALE_EN = {
+    "Today",
+    "No data available.",
+    "Fetch error",
+    "Failed to load.",
+    "Press SELECT to retry.",
+    {"Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"},
+    {"January", "February", "March", "April", "May", "June",
+     "July", "August", "September", "October", "November", "December"},
+    0
+};
+
+static const LocaleStrings LOCALE_DE = {
+    "Heute",
+    "Keine Daten verfügbar.",
+    "Fehler beim Laden",
+    "Laden fehlgeschlagen.",
+    "Zum Wiederholen SELECT drücken.",
+    {"Mo", "Di", "Mi", "Do", "Fr", "Sa", "So"},
+    {"Januar", "Februar", "März", "April", "Mai", "Juni",
+     "Juli", "August", "September", "Oktober", "November", "Dezember"},
+    1
+};
+
+static const LocaleStrings LOCALE_IT = {
+    "Oggi",
+    "Nessun dato disponibile.",
+    "Errore di caricamento",
+    "Caricamento non riuscito.",
+    "Premi SELECT per riprovare.",
+    {"Lun", "Mar", "Mer", "Gio", "Ven", "Sab", "Dom"},
+    {"gennaio", "febbraio", "marzo", "aprile", "maggio", "giugno",
+     "luglio", "agosto", "settembre", "ottobre", "novembre", "dicembre"},
+    2
+};
+
+static const LocaleStrings LOCALE_ES = {
+    "Hoy",
+    "No hay datos disponibles.",
+    "Error al cargar",
+    "No se pudo cargar.",
+    "Pulsa SELECT para reintentar.",
+    {"Lun", "Mar", "Mié", "Jue", "Vie", "Sáb", "Dom"},
+    {"enero", "febrero", "marzo", "abril", "mayo", "junio",
+     "julio", "agosto", "septiembre", "octubre", "noviembre", "diciembre"},
+    2
+};
+
+static const LocaleStrings LOCALE_FR = {
+    "Aujourd'hui",
+    "Aucune donnée disponible.",
+    "Erreur de chargement",
+    "Échec du chargement.",
+    "Appuyez sur SELECT pour réessayer.",
+    {"Lun", "Mar", "Mer", "Jeu", "Ven", "Sam", "Dim"},
+    {"janvier", "février", "mars", "avril", "mai", "juin",
+     "juillet", "août", "septembre", "octobre", "novembre", "décembre"},
+    2
+};
+
+static const LocaleStrings *current_locale(void) {
+    if (strncmp(s_language, "de", 2) == 0) return &LOCALE_DE;
+    if (strncmp(s_language, "it", 2) == 0) return &LOCALE_IT;
+    if (strncmp(s_language, "es", 2) == 0) return &LOCALE_ES;
+    if (strncmp(s_language, "fr", 2) == 0) return &LOCALE_FR;
+    return &LOCALE_EN;
+}
+
+/* Device language -> wol.jw.org defaults, used on first run (issue: preselect
+   the watch's language). Codes from config/languages.json. */
+typedef struct {
+    const char *code;
+    const char *lib;
+    const char *rsconf;
+} DeviceLocale;
+
+static const DeviceLocale DEVICE_LOCALES[] = {
+    {"de", "lp-x", "10"},
+    {"es", "lp-s", "4"},
+    {"fr", "lp-f", "1"},
+    {"it", "lp-i", "1"},
+    {"pt", "lp-t", "1"},
+    {"nl", "lp-o", "1"},
+    {"pl", "lp-p", "1"},
+    {"ru", "lp-u", "1"},
+    {"ja", "lp-j", "7"},
+    {"ko", "lp-ko", "1"},
+};
+
+static void detect_device_language(char *lang_out, int lang_size,
+                                   char *lib_out, int lib_size,
+                                   char *rsconf_out, int rsconf_size) {
+    char code[3] = {0, 0, 0};
+    const char *sys = i18n_get_system_locale();
+    if (sys && sys[0] && sys[1]) {
+        char a = sys[0], b = sys[1];
+        code[0] = (a >= 'A' && a <= 'Z') ? a + 32 : a;
+        code[1] = (b >= 'A' && b <= 'Z') ? b + 32 : b;
+    }
+    APP_LOG(APP_LOG_LEVEL_INFO, "System locale: %s (code %s)", sys ? sys : "?", code);
+
+    const DeviceLocale *match = NULL;
+    for (unsigned int i = 0; i < ARRAY_LENGTH(DEVICE_LOCALES); i++) {
+        if (strcmp(code, DEVICE_LOCALES[i].code) == 0) {
+            match = &DEVICE_LOCALES[i];
+            break;
+        }
+    }
+    snprintf(lang_out, lang_size, "%s", match ? match->code : "en");
+    snprintf(lib_out, lib_size, "%s", match ? match->lib : "lp-e");
+    snprintf(rsconf_out, rsconf_size, "%s", match ? match->rsconf : "1");
+}
+
 static void add_days_to_date(int year, int month, int day, int days_to_add, char *result, int result_size) {
     int total_days = date_to_days(year, month, day) + days_to_add;
     int y = 1;
@@ -269,21 +393,21 @@ static void tick_handler(struct tm *tick_time, TimeUnits units_changed) {
 }
 
 static void prv_format_date_str(char *buf, int size, int y, int m, int d) {
-    static const char *names[] = {
-        "January", "February", "March", "April", "May", "June",
-        "July", "August", "September", "October", "November", "December"
-    };
-    static const char *dow[] = {
-        "Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"
-    };
-    const char *mon = (m >= 1 && m <= 12) ? names[m - 1] : "?";
-    const char *day_name = dow[weekday_of(y, m, d)];
-    const char *sfx = "th";
-    if (d >= 11 && d <= 13) sfx = "th";
-    else if (d % 10 == 1) sfx = "st";
-    else if (d % 10 == 2) sfx = "nd";
-    else if (d % 10 == 3) sfx = "rd";
-    snprintf(buf, size, "%s %s %d%s", day_name, mon, d, sfx);
+    const LocaleStrings *loc = current_locale();
+    const char *mon = (m >= 1 && m <= 12) ? loc->months[m - 1] : "?";
+    const char *day_name = loc->weekdays[weekday_of(y, m, d)];
+    if (loc->date_style == 0) {
+        const char *sfx = "th";
+        if (d >= 11 && d <= 13) sfx = "th";
+        else if (d % 10 == 1) sfx = "st";
+        else if (d % 10 == 2) sfx = "nd";
+        else if (d % 10 == 3) sfx = "rd";
+        snprintf(buf, size, "%s %s %d%s", day_name, mon, d, sfx);
+    } else if (loc->date_style == 1) {
+        snprintf(buf, size, "%s %d. %s", day_name, d, mon);
+    } else {
+        snprintf(buf, size, "%s %d %s", day_name, d, mon);
+    }
 }
 
 static void draw_bar(GContext *ctx, GRect bounds, const char *text,
@@ -705,8 +829,9 @@ static void click_config_provider(void *context) {
 }
 
 static void update_ui(void) {
+    const LocaleStrings *loc = current_locale();
     if (is_today(s_current_year, s_current_month, s_current_day)) {
-        snprintf(s_banner_text, sizeof(s_banner_text), "Today");
+        snprintf(s_banner_text, sizeof(s_banner_text), "%s", loc->today);
     } else {
         prv_format_date_str(s_banner_text, sizeof(s_banner_text), s_current_year, s_current_month, s_current_day);
     }
@@ -727,7 +852,9 @@ static void update_ui(void) {
     DayEntry *e = current_entry();
     if (!e || !e->has_data) {
         loading_cancel();
-        text_layer_set_text(s_body_layer, "No data available.\nPress SELECT to retry.");
+        static char no_data_msg[160];
+        snprintf(no_data_msg, sizeof(no_data_msg), "%s\n%s", loc->no_data, loc->retry_hint);
+        text_layer_set_text(s_body_layer, no_data_msg);
         layer_set_frame(text_layer_get_layer(s_body_layer), GRect(4, 0, scroll_w - 8, 200));
         layer_set_hidden(text_layer_get_layer(s_body_layer), false);
         scroll_layer_set_content_size(s_scroll_layer, GSize(scroll_w, scroll_frame.size.h));
@@ -737,7 +864,8 @@ static void update_ui(void) {
         return;
     }
 
-    static char body_text[3500];
+    /* Max possible: ref 127 + text 639 + commentary 1199 + 6 separators = 1971 */
+    static char body_text[2200];
     snprintf(body_text, sizeof(body_text), "%s\n\n\"%s\"\n\n%s",
              e->ref, e->text, e->commentary);
     text_layer_set_text(s_body_layer, body_text);
@@ -905,12 +1033,13 @@ static void inbox_received_handler(DictionaryIterator *iter, void *context) {
             update_ui();
         } else {
             loading_cancel();
+            const LocaleStrings *loc = current_locale();
             Tuple *err_t = dict_find(iter, KEY_ERROR);
-            static char err_msg[128];
+            static char err_msg[192];
             if (err_t) {
-                snprintf(err_msg, sizeof(err_msg), "Fetch error: %s\nSELECT to retry.", err_t->value->cstring);
+                snprintf(err_msg, sizeof(err_msg), "%s: %s\n%s", loc->fetch_error, err_t->value->cstring, loc->retry_hint);
             } else {
-                snprintf(err_msg, sizeof(err_msg), "Failed to load.\nPress SELECT to retry.");
+                snprintf(err_msg, sizeof(err_msg), "%s\n%s", loc->load_failed, loc->retry_hint);
             }
             GRect scroll_frame = layer_get_frame(scroll_layer_get_layer(s_scroll_layer));
             text_layer_set_text(s_body_layer, err_msg);
@@ -1062,33 +1191,25 @@ static void init(void) {
     load_cache_from_persist();
     evict_old_entries();
 
+    char def_lang[8], def_lib[16], def_rsconf[8];
+    detect_device_language(def_lang, sizeof(def_lang), def_lib, sizeof(def_lib), def_rsconf, sizeof(def_rsconf));
+
     if (persist_exists(PERSIST_KEY_LANGUAGE)) {
         persist_read_string(PERSIST_KEY_LANGUAGE, s_language, sizeof(s_language));
     } else {
-        strncpy(s_language, "en", sizeof(s_language) - 1);
-        s_language[sizeof(s_language) - 1] = '\0';
+        snprintf(s_language, sizeof(s_language), "%s", def_lang);
     }
 
     if (persist_exists(PERSIST_KEY_LIB)) {
         persist_read_string(PERSIST_KEY_LIB, s_lib, sizeof(s_lib));
     } else {
-        strncpy(s_lib, "lp-e", sizeof(s_lib) - 1);
-        s_lib[sizeof(s_lib) - 1] = '\0';
+        snprintf(s_lib, sizeof(s_lib), "%s", def_lib);
     }
 
     if (persist_exists(PERSIST_KEY_RSCONF)) {
         persist_read_string(PERSIST_KEY_RSCONF, s_rsconf, sizeof(s_rsconf));
     } else {
-        if (strncmp(s_language, "de", 2) == 0) {
-            strncpy(s_rsconf, "10", sizeof(s_rsconf) - 1);
-        } else if (strncmp(s_language, "es", 2) == 0) {
-            strncpy(s_rsconf, "4", sizeof(s_rsconf) - 1);
-        } else if (strncmp(s_language, "ja", 2) == 0) {
-            strncpy(s_rsconf, "7", sizeof(s_rsconf) - 1);
-        } else {
-            strncpy(s_rsconf, "1", sizeof(s_rsconf) - 1);
-        }
-        s_rsconf[sizeof(s_rsconf) - 1] = '\0';
+        snprintf(s_rsconf, sizeof(s_rsconf), "%s", def_rsconf);
     }
 
     if (persist_exists(PERSIST_KEY_CACHE_DAYS)) {
