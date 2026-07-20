@@ -111,6 +111,19 @@ static int date_to_days(int year, int month, int day) {
     return days;
 }
 
+/* 0 = Monday ... 6 = Sunday. Anchor: 2026-07-17 was a Friday (index 4). */
+static int weekday_of(int year, int month, int day) {
+    return (date_to_days(year, month, day) + 5) % 7;
+}
+
+static bool is_today(int year, int month, int day) {
+    time_t now = time(NULL);
+    struct tm *local = localtime(&now);
+    return year == local->tm_year + 1900 &&
+           month == local->tm_mon + 1 &&
+           day == local->tm_mday;
+}
+
 static void add_days_to_date(int year, int month, int day, int days_to_add, char *result, int result_size) {
     int total_days = date_to_days(year, month, day) + days_to_add;
     int y = 1;
@@ -211,18 +224,6 @@ static void reset_scroll_to_top(void);
 static void prv_update_indicators(ScrollLayer *scroll_layer, void *context);
 static void swap_down_complete(Animation *animation, bool finished, void *context);
 
-static int estimate_text_height(const char *text) {
-    int chars_per_line = 15;
-    int line_height = 26;
-    int lines = 1;
-    int col = 0;
-    for (int i = 0; text[i]; i++) {
-        if (text[i] == '\n') { lines++; col = 0; }
-        else { col++; if (col >= chars_per_line) { lines++; col = 0; } }
-    }
-    return lines * line_height + 4;
-}
-
 static int days_in_month(int year, int month) {
     if (month == 2) {
         int leap = (year % 4 == 0 && (year % 100 != 0 || year % 400 == 0));
@@ -253,13 +254,17 @@ static void prv_format_date_str(char *buf, int size, int y, int m, int d) {
         "January", "February", "March", "April", "May", "June",
         "July", "August", "September", "October", "November", "December"
     };
+    static const char *dow[] = {
+        "Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"
+    };
     const char *mon = (m >= 1 && m <= 12) ? names[m - 1] : "?";
+    const char *day_name = dow[weekday_of(y, m, d)];
     const char *sfx = "th";
     if (d >= 11 && d <= 13) sfx = "th";
     else if (d % 10 == 1) sfx = "st";
     else if (d % 10 == 2) sfx = "nd";
     else if (d % 10 == 3) sfx = "rd";
-    snprintf(buf, size, "%s %d%s, %d", mon, d, sfx, y);
+    snprintf(buf, size, "%s %s %d%s", day_name, mon, d, sfx);
 }
 
 static void banner_update_proc(Layer *layer, GContext *ctx) {
@@ -388,8 +393,8 @@ static void scroll_down_one_step(void) {
     
     if (offset.y <= max_scroll) {
         if (s_current_day >= s_days_in_month) return;
-        
-        int body_h = text_layer_get_content_size(s_body_layer).h + 4;
+
+        int body_h = layer_get_frame(text_layer_get_layer(s_body_layer)).size.h;
         s_swap_in_progress = true;
         
         if (s_scroll_animation) {
@@ -474,7 +479,11 @@ static void click_config_provider(void *context) {
 }
 
 static void update_ui(void) {
-    prv_format_date_str(s_banner_text, sizeof(s_banner_text), s_current_year, s_current_month, s_current_day);
+    if (is_today(s_current_year, s_current_month, s_current_day)) {
+        snprintf(s_banner_text, sizeof(s_banner_text), "Today");
+    } else {
+        prv_format_date_str(s_banner_text, sizeof(s_banner_text), s_current_year, s_current_month, s_current_day);
+    }
     layer_mark_dirty(s_banner_layer);
 
     if (s_waiting_for_phone) {
@@ -501,12 +510,14 @@ static void update_ui(void) {
              e->ref, e->text, e->commentary);
     text_layer_set_text(s_body_layer, body_text);
 
-    int measured_h = text_layer_get_content_size(s_body_layer).h + 4;
-    int estimated_h = estimate_text_height(body_text);
-    int body_h = measured_h > estimated_h ? measured_h : estimated_h;
-    layer_mark_dirty(text_layer_get_layer(s_body_layer));
     GRect scroll_frame = layer_get_frame(scroll_layer_get_layer(s_scroll_layer));
     int scroll_w = scroll_frame.size.w;
+    GSize text_size = graphics_text_layout_get_content_size(
+        body_text, fonts_get_system_font(FONT_KEY_GOTHIC_28),
+        GRect(0, 0, scroll_w, 8000), GTextOverflowModeWordWrap, GTextAlignmentLeft);
+    int body_h = text_size.h + 4;
+    layer_set_frame(text_layer_get_layer(s_body_layer), GRect(0, 0, scroll_w, body_h));
+    layer_mark_dirty(text_layer_get_layer(s_body_layer));
 
     if (s_current_day < s_days_in_month) {
         int ny = s_current_year, nm = s_current_month, nd = s_current_day + 1;
