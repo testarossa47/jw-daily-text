@@ -39,7 +39,7 @@
 #define REVEAL_ANIM_DURATION_MS 260
 #define LOADING_FILL_DURATION_MS 2400
 #define LOADING_DONE_DURATION_MS 180
-#define TOUCH_SWAP_THRESHOLD 30
+#define TOUCH_SWAP_THRESHOLD 50
 
 #define COLOR_BANNER PBL_IF_COLOR_ELSE(GColorVividViolet, GColorDarkGray)
 #define COLOR_BANNER_TEXT GColorWhite
@@ -803,7 +803,8 @@ static void touch_handler(const TouchEvent *event, void *context) {
         s_touch_raw_offset = s_touch_start_offset;
     } else if (event->type == TouchEvent_PositionUpdate) {
         if (!s_touch_active) return;
-        int raw = s_touch_start_offset + ((int)s_touch_start_y - event->y);
+        /* content follows the finger 1:1 (offset is <= 0, y grows downward) */
+        int raw = s_touch_start_offset + (event->y - (int)s_touch_start_y);
         s_touch_raw_offset = raw;
         int clamped = raw;
         if (clamped > 0) clamped = 0;
