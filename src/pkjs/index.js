@@ -10,9 +10,22 @@ var LS_PREFIX = "dt.";
 var currentLocale = "en";
 var currentLib = "lp-e";
 var currentRsconf = "1";
-var cacheDays = 7;
+var phoneCacheDays = 30;
+var watchCacheDays = 30;
+var PHONE_CACHE_MIN = 1;
+var PHONE_CACHE_MAX = 30;
+var WATCH_CACHE_MIN = 7;
+var WATCH_CACHE_MAX = 30;
 var importRunning = false;
 var importStopped = false;
+
+function clamp(v, lo, hi) {
+	return v < lo ? lo : (v > hi ? hi : v);
+}
+
+function dateToStr(d) {
+	return d.getFullYear() + "-" + ("0" + (d.getMonth() + 1)).slice(-2) + "-" + ("0" + d.getDate()).slice(-2);
+}
 
 function stripTags(text) {
 	return text.replace(/<[^>]+>/g, "").replace(/\s+/g, " ").replace(/\u200b/g, "").trim();
@@ -58,11 +71,17 @@ function loadState() {
 		if (lb) currentLib = lb;
 		var rc = localStorage.getItem(LS_PREFIX + "_rsconf");
 		if (rc) currentRsconf = rc;
-		var cd = localStorage.getItem(LS_PREFIX + "_cacheDays");
-		if (cd) cacheDays = parseInt(cd, 10) || 7;
+		var pcd = localStorage.getItem(LS_PREFIX + "_phoneCacheDays");
+		var wcd = localStorage.getItem(LS_PREFIX + "_watchCacheDays");
+		if (!pcd && !wcd) {
+			var legacy = localStorage.getItem(LS_PREFIX + "_cacheDays");
+			if (legacy) { pcd = legacy; wcd = legacy; }
+		}
+		if (pcd) phoneCacheDays = parseInt(pcd, 10) || PHONE_CACHE_MAX;
+		if (wcd) watchCacheDays = parseInt(wcd, 10) || WATCH_CACHE_MAX;
 	} catch (e) {}
-	if (cacheDays < 1) cacheDays = 1;
-	if (cacheDays > 14) cacheDays = 14;
+	phoneCacheDays = clamp(phoneCacheDays, PHONE_CACHE_MIN, PHONE_CACHE_MAX);
+	watchCacheDays = clamp(watchCacheDays, WATCH_CACHE_MIN, WATCH_CACHE_MAX);
 }
 
 function saveState() {
@@ -70,7 +89,37 @@ function saveState() {
 		localStorage.setItem(LS_PREFIX + "_locale", currentLocale);
 		localStorage.setItem(LS_PREFIX + "_lib", currentLib);
 		localStorage.setItem(LS_PREFIX + "_rsconf", currentRsconf);
-		localStorage.setItem(LS_PREFIX + "_cacheDays", String(cacheDays));
+		localStorage.setItem(LS_PREFIX + "_phoneCacheDays", String(phoneCacheDays));
+		localStorage.setItem(LS_PREFIX + "_watchCacheDays", String(watchCacheDays));
+		localStorage.setItem(LS_PREFIX + "_cacheDays", String(watchCacheDays));
+	} catch (e) {}
+}
+
+/* Drop cached days outside the retention window (and stale other locales). */
+function pruneCache() {
+	try {
+		var today = new Date();
+		today = new Date(today.getFullYear(), today.getMonth(), today.getDate());
+		var keepPast = 7;
+		var keepFuture = Math.max(phoneCacheDays, watchCacheDays);
+		var keys = Object.keys(localStorage);
+		for (var i = 0; i < keys.length; i++) {
+			var k = keys[i];
+			if (k.indexOf(LS_PREFIX) !== 0) continue;
+			var rest = k.substring(LS_PREFIX.length);
+			if (rest.indexOf("_") === 0) continue;
+			var colon = rest.indexOf(":");
+			if (colon < 0) continue;
+			if (rest.substring(0, colon) !== currentLocale) {
+				localStorage.removeItem(k);
+				continue;
+			}
+			var parts = rest.substring(colon + 1).split("-");
+			if (parts.length !== 3) { localStorage.removeItem(k); continue; }
+			var d = new Date(parseInt(parts[0], 10), parseInt(parts[1], 10) - 1, parseInt(parts[2], 10));
+			var diff = Math.round((d - today) / 86400000);
+			if (diff < -keepPast || diff > keepFuture) localStorage.removeItem(k);
+		}
 	} catch (e) {}
 }
 
@@ -244,17 +293,12 @@ function startYearlyImport(stopIfRunning) {
 	importStopped = false;
 
 	var today = new Date();
-	var year = today.getFullYear();
-	var month = today.getMonth() + 1;
-	var day = today.getDate();
+	var horizon = Math.max(phoneCacheDays, watchCacheDays);
 
 	var dates = [];
-	for (var m = month; m <= 12; m++) {
-		var total = daysInMonth(year, m);
-		var start = (m === month) ? day : 1;
-		for (var d = start; d <= total; d++) {
-			dates.push(year + "-" + ("0" + m).slice(-2) + "-" + ("0" + d).toString().slice(-2));
-		}
+	for (var i = 0; i <= horizon; i++) {
+		var d = new Date(today.getFullYear(), today.getMonth(), today.getDate() + i);
+		dates.push(dateToStr(d));
 	}
 
 	function importNext(idx) {
@@ -278,7 +322,9 @@ function startYearlyImport(stopIfRunning) {
 
 Pebble.addEventListener("ready", function () {
 	loadState();
-	console.log("JW Daily Text ready: " + currentLocale + " " + currentLib + " r" + currentRsconf);
+	pruneCache();
+	console.log("JW Daily Text ready: " + currentLocale + " " + currentLib + " r" + currentRsconf +
+		" (phone " + phoneCacheDays + "d, watch " + watchCacheDays + "d)");
 	findRsconf(currentLocale, currentLib, function(rsconf) {
 		if (rsconf && rsconf !== currentRsconf) {
 			currentRsconf = rsconf;
@@ -290,7 +336,8 @@ Pebble.addEventListener("ready", function () {
 });
 
 Pebble.addEventListener("showConfiguration", function () {
-	Pebble.openURL(CONFIG_URL + "?v=" + Date.now() + "&locale=" + currentLocale + "&lib=" + currentLib + "&rsconf=" + currentRsconf);
+	Pebble.openURL(CONFIG_URL + "?v=" + Date.now() + "&locale=" + currentLocale + "&lib=" + currentLib +
+		"&rsconf=" + currentRsconf + "&pcd=" + phoneCacheDays + "&wcd=" + watchCacheDays);
 });
 
 Pebble.addEventListener("webviewclosed", function (e) {
@@ -301,9 +348,12 @@ Pebble.addEventListener("webviewclosed", function (e) {
 			var oldLocale = currentLocale;
 			currentLocale = config.locale;
 			currentLib = config.lib;
-			cacheDays = config.cacheDays || 7;
-			if (cacheDays < 1) cacheDays = 1;
-			if (cacheDays > 14) cacheDays = 14;
+			if (typeof config.phoneCacheDays === "number") {
+				phoneCacheDays = clamp(config.phoneCacheDays, PHONE_CACHE_MIN, PHONE_CACHE_MAX);
+			}
+			if (typeof config.watchCacheDays === "number") {
+				watchCacheDays = clamp(config.watchCacheDays, WATCH_CACHE_MIN, WATCH_CACHE_MAX);
+			}
 			if (currentLocale !== oldLocale) {
 				clearLocaleCache();
 			}
@@ -313,11 +363,12 @@ Pebble.addEventListener("webviewclosed", function (e) {
 				saveState();
 				Pebble.sendAppMessage({
 					action: ACTION_LANGUAGE_CHANGED,
-					language: currentLocale, lib: currentLib, rsconf: currentRsconf, cache_days: cacheDays
+					language: currentLocale, lib: currentLib, rsconf: currentRsconf, cache_days: watchCacheDays
 				});
 				startYearlyImport(true);
 				setTimeout(function () { startYearlyImport(false); }, 500);
-				console.log("Language: " + config.name + " (" + currentLocale + " " + currentLib + " r" + currentRsconf + ")");
+				console.log("Language: " + config.name + " (" + currentLocale + " " + currentLib + " r" + currentRsconf +
+					", phone " + phoneCacheDays + "d, watch " + watchCacheDays + "d)");
 			});
 		}
 	} catch (err) { console.log("Config error: " + err); }
@@ -338,7 +389,6 @@ Pebble.addEventListener("appmessage", function (e) {
 	var locale = payload.language || currentLocale;
 	currentLocale = locale;
 	currentLib = payload.lib || currentLib;
-	cacheDays = payload.cache_days || cacheDays;
 	saveState();
 
 	findRsconf(currentLocale, currentLib, function(rsconf) {
@@ -358,7 +408,7 @@ Pebble.addEventListener("appmessage", function (e) {
 				return;
 			}
 			sendResult(res.result.date, res.result.ref, res.result.text, res.result.commentary);
-			var preFetchEnd = Math.min(day + cacheDays - 1, totalDays);
+			var preFetchEnd = Math.min(day + Math.max(phoneCacheDays, watchCacheDays) - 1, totalDays);
 			if (day + 1 <= preFetchEnd) {
 				setTimeout(function () { preFetchDays(year, month, day + 1, preFetchEnd); }, 300);
 			}
