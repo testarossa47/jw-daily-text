@@ -49,7 +49,7 @@
 #define LOADING_DONE_DURATION_MS 180
 #define TOUCH_SWAP_THRESHOLD 50
 
-#define COLOR_BANNER PBL_IF_COLOR_ELSE(GColorLiberty, GColorDarkGray)
+#define COLOR_BANNER PBL_IF_COLOR_ELSE(GColorIndigo, GColorDarkGray)
 #define COLOR_BANNER_TEXT GColorWhite
 #define COLOR_NEXT_BAR COLOR_BANNER
 #define COLOR_NEXT_BAR_TEXT GColorWhite
