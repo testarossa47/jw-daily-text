@@ -86,7 +86,7 @@ h1 {
   color: #555;
   flex: 1;
 }
-#cache-days {
+#phone-cache-days, #watch-cache-days {
   width: 60px;
   padding: 6px 8px;
   font-size: 16px;
@@ -95,7 +95,7 @@ h1 {
   text-align: center;
   outline: none;
 }
-#cache-days:focus { border-color: #799fcc; }
+#phone-cache-days:focus, #watch-cache-days:focus { border-color: #799fcc; }
 #save-bar {
   position: fixed;
   bottom: 0;
@@ -140,8 +140,12 @@ h1 {
 <div id="count"></div>
 <ul id="list"></ul>
 <div id="cache-section">
-  <label for="cache-days">Offline days (1&#8211;14):</label>
-  <input type="number" id="cache-days" min="1" max="14" value="7">
+  <label for="phone-cache-days">Offline days on phone (1&#8211;30):</label>
+  <input type="number" id="phone-cache-days" min="1" max="30" value="30">
+</div>
+<div id="cache-section">
+  <label for="watch-cache-days">Offline days on watch (7&#8211;30):</label>
+  <input type="number" id="watch-cache-days" min="7" max="30" value="30">
 </div>
 <div id="status"></div>
 
@@ -205,16 +209,21 @@ function saveSelection() {
     return;
   }
 
-  let cacheDays = parseInt(document.getElementById("cache-days").value, 10);
-  if (isNaN(cacheDays) || cacheDays < 1) cacheDays = 1;
-  if (cacheDays > 14) cacheDays = 14;
+  let phoneCacheDays = parseInt(document.getElementById("phone-cache-days").value, 10);
+  if (isNaN(phoneCacheDays) || phoneCacheDays < 1) phoneCacheDays = 1;
+  if (phoneCacheDays > 30) phoneCacheDays = 30;
+
+  let watchCacheDays = parseInt(document.getElementById("watch-cache-days").value, 10);
+  if (isNaN(watchCacheDays) || watchCacheDays < 7) watchCacheDays = 7;
+  if (watchCacheDays > 30) watchCacheDays = 30;
 
   const data = JSON.stringify({
     locale: selectedLocale,
     lib: selectedLib,
     name: selectedName,
     rsconf: selectedRsconf || "1",
-    cacheDays: cacheDays
+    phoneCacheDays: phoneCacheDays,
+    watchCacheDays: watchCacheDays
   });
 
   let saved = false;
@@ -243,7 +252,8 @@ function saveSelection() {
 
 function getParams() {
   const p = new URLSearchParams(window.location.search);
-  return { locale: p.get("locale"), lib: p.get("lib"), rsconf: p.get("rsconf") };
+  return { locale: p.get("locale"), lib: p.get("lib"), rsconf: p.get("rsconf"),
+           pcd: p.get("pcd"), wcd: p.get("wcd") };
 }
 
 const params = getParams();
@@ -256,6 +266,16 @@ if (params.locale && params.lib) {
     selectedRsconf = found.rsconf || params.rsconf || "1";
   }
 }
+(function prefillCacheDays() {
+  const pcd = parseInt(params.pcd, 10);
+  if (!isNaN(pcd)) {
+    document.getElementById("phone-cache-days").value = Math.min(30, Math.max(1, pcd));
+  }
+  const wcd = parseInt(params.wcd, 10);
+  if (!isNaN(wcd)) {
+    document.getElementById("watch-cache-days").value = Math.min(30, Math.max(7, wcd));
+  }
+})();
 showCurrent();
 renderList("");
 

@@ -74,3 +74,9 @@ All texts are retrieved at runtime from
 [wol.jw.org](https://wol.jw.org) (Watchtower ONLINE LIBRARY) in the language
 configured in the app settings. The app stores fetched texts only locally on
 your devices.
+
+## License
+
+Released under the [MIT License](LICENSE). Feel free to fork and adapt the
+project. The app itself is not an official Jehovah's Witnesses product; all
+content belongs to its respective copyright holders.

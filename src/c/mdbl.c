@@ -27,10 +27,18 @@
 #define PERSIST_KEY_CACHE_DAYS 2
 #define PERSIST_KEY_LIB 3
 #define PERSIST_KEY_RSCONF 4
+/* Key 5 held a legacy single-blob cache that the firmware silently truncated
+   (persist values are capped at 256 bytes); it is deleted on boot. */
 #define PERSIST_KEY_CACHE 5
+#define PERSIST_KEY_DAY_BASE 100
 #define CACHE_SIZE 25
 #define PAST_DAYS_KEEP 7
-#define FUTURE_DAYS_PREFETCH 14
+#define MIN_WATCH_CACHE_DAYS 7
+#define MAX_WATCH_CACHE_DAYS 30
+#define DEFAULT_WATCH_CACHE_DAYS MAX_WATCH_CACHE_DAYS
+#define PERSIST_CHUNK_SIZE 256
+#define MAX_CHUNKS_PER_DAY 8
+#define MAX_PERSIST_SLOTS (PAST_DAYS_KEEP + 1 + MAX_WATCH_CACHE_DAYS + 2)
 #define SCROLL_INCREMENT 36
 #define SCROLL_REPEAT_INTERVAL_MS 220
 #define ARROW_HEIGHT 19
@@ -41,17 +49,17 @@
 #define LOADING_DONE_DURATION_MS 180
 #define TOUCH_SWAP_THRESHOLD 50
 
-#define COLOR_BANNER PBL_IF_COLOR_ELSE(GColorVividViolet, GColorDarkGray)
+#define COLOR_BANNER PBL_IF_COLOR_ELSE(GColorIndigo, GColorDarkGray)
 #define COLOR_BANNER_TEXT GColorWhite
-#define COLOR_NEXT_BAR PBL_IF_COLOR_ELSE(GColorBlueMoon, GColorLightGray)
-#define COLOR_NEXT_BAR_TEXT GColorBlack
+#define COLOR_NEXT_BAR COLOR_BANNER
+#define COLOR_NEXT_BAR_TEXT GColorWhite
 
 typedef struct {
     bool has_data;
     char date[11];
-    char ref[128];
-    char text[640];
-    char commentary[1200];
+    char ref[64];
+    char text[512];
+    char commentary[1152];
 } DayEntry;
 
 static const int ACTION_FETCH = 1;
@@ -95,16 +103,19 @@ static int s_scroll_anim_start_y = 0;
 static int s_scroll_anim_target_y = 0;
 static AnimationImplementation s_scroll_anim_impl;
 
+static DayEntry *get_day_anywhere(const char *date_str);
+static DayEntry *alloc_ram_entry(void);
+static int persist_find_slot(const char *date_str);
+static void persist_dir_load(void);
+static void persist_wipe_all(void);
+static void prune_persist_cache(void);
+static void save_day_to_persist(const DayEntry *e);
+
 static DayEntry *current_entry(void) {
     char date_str[11];
     snprintf(date_str, sizeof(date_str), "%d-%02d-%02d", s_current_year, s_current_month, s_current_day);
-    
-    for (int i = 0; i < CACHE_SIZE; i++) {
-        if (s_cache[i].has_data && strcmp(s_cache[i].date, date_str) == 0) {
-            return &s_cache[i];
-        }
-    }
-    return NULL;
+
+    return get_day_anywhere(date_str);
 }
 
 static DayEntry *find_cache_entry(const char *date_str) {
@@ -313,18 +324,22 @@ static int parse_date(const char *date_str, int *year, int *month, int *day) {
     return (*year > 0 && *month >= 1 && *month <= 12 && *day >= 1 && *day <= 31);
 }
 
+static bool day_is_cached(const char *date_str) {
+    return find_cache_entry(date_str) != NULL || persist_find_slot(date_str) >= 0;
+}
+
 static int count_future_cached_days(const char *from_date) {
     int count = 0;
     int year, month, day;
     if (!parse_date(from_date, &year, &month, &day)) return 0;
-    
+
     char next_date[11];
     add_days_to_date(year, month, day, 1, next_date, sizeof(next_date));
-    
-    while (count < FUTURE_DAYS_PREFETCH) {
-        if (!find_cache_entry(next_date)) break;
+
+    while (count < s_cache_days) {
+        if (!day_is_cached(next_date)) break;
         count++;
-        
+
         int y, m, d;
         parse_date(next_date, &y, &m, &d);
         add_days_to_date(y, m, d, 1, next_date, sizeof(next_date));
@@ -349,12 +364,222 @@ static void evict_old_entries(void) {
     }
 }
 
-static void save_cache_to_persist(void) {
-    persist_write_data(PERSIST_KEY_CACHE, s_cache, sizeof(s_cache));
+/* Persistent day cache. Firmware caps each persist value at 256 bytes, so a
+   day is stored as a packed record split into chunks across consecutive keys:
+   key = PERSIST_KEY_DAY_BASE + slot * MAX_CHUNKS_PER_DAY + chunk.
+   Record layout: date[11] | ref_len u16 | text_len u16 | comm_len u16
+   (lengths include the NUL), then ref, text, commentary. */
+
+#define RECORD_HEADER_SIZE 17
+#define MAX_RECORD_SIZE (RECORD_HEADER_SIZE + sizeof(((DayEntry *)0)->ref) + \
+                         sizeof(((DayEntry *)0)->text) + sizeof(((DayEntry *)0)->commentary))
+
+static char s_persist_dir[MAX_PERSIST_SLOTS][11];
+static uint8_t s_record_buf[MAX_RECORD_SIZE];
+
+static uint32_t day_chunk_key(int slot, int chunk) {
+    return PERSIST_KEY_DAY_BASE + (uint32_t)slot * MAX_CHUNKS_PER_DAY + (uint32_t)chunk;
 }
 
-static void load_cache_from_persist(void) {
-    persist_read_data(PERSIST_KEY_CACHE, s_cache, sizeof(s_cache));
+static bool valid_stored_date(const char *d) {
+    for (int i = 0; i < 10; i++) {
+        char c = d[i];
+        if (c == '\0') return false;
+        if (i == 4 || i == 7) {
+            if (c != '-') return false;
+        } else if (c < '0' || c > '9') {
+            return false;
+        }
+    }
+    return d[10] == '\0';
+}
+
+static int persist_find_slot(const char *date_str) {
+    for (int i = 0; i < MAX_PERSIST_SLOTS; i++) {
+        if (s_persist_dir[i][0] && strcmp(s_persist_dir[i], date_str) == 0) return i;
+    }
+    return -1;
+}
+
+static int persist_free_slot(void) {
+    for (int i = 0; i < MAX_PERSIST_SLOTS; i++) {
+        if (!s_persist_dir[i][0]) return i;
+    }
+    return -1;
+}
+
+static void delete_persist_slot(int slot) {
+    for (int j = 0; j < MAX_CHUNKS_PER_DAY; j++) {
+        persist_delete(day_chunk_key(slot, j));
+    }
+    s_persist_dir[slot][0] = '\0';
+}
+
+static void persist_dir_load(void) {
+    memset(s_persist_dir, 0, sizeof(s_persist_dir));
+    uint8_t hdr[RECORD_HEADER_SIZE];
+    int count = 0;
+    for (int i = 0; i < MAX_PERSIST_SLOTS; i++) {
+        if (persist_read_data(day_chunk_key(i, 0), hdr, sizeof(hdr)) < (int)sizeof(hdr)) continue;
+        if (!valid_stored_date((const char *)hdr)) continue;
+        uint16_t ref_len = hdr[11] | (hdr[12] << 8);
+        uint16_t text_len = hdr[13] | (hdr[14] << 8);
+        uint16_t comm_len = hdr[15] | (hdr[16] << 8);
+        if (ref_len < 1 || ref_len > sizeof(((DayEntry *)0)->ref)) continue;
+        if (text_len < 1 || text_len > sizeof(((DayEntry *)0)->text)) continue;
+        if (comm_len < 1 || comm_len > sizeof(((DayEntry *)0)->commentary)) continue;
+        memcpy(s_persist_dir[i], hdr, 11);
+        count++;
+    }
+    APP_LOG(APP_LOG_LEVEL_INFO, "Persist dir loaded %d days", count);
+}
+
+static bool load_day_from_persist(const char *date_str, DayEntry *out) {
+    int slot = persist_find_slot(date_str);
+    if (slot < 0) return false;
+
+    uint8_t hdr[RECORD_HEADER_SIZE];
+    if (persist_read_data(day_chunk_key(slot, 0), hdr, sizeof(hdr)) < (int)sizeof(hdr)) return false;
+    uint16_t ref_len = hdr[11] | (hdr[12] << 8);
+    uint16_t text_len = hdr[13] | (hdr[14] << 8);
+    uint16_t comm_len = hdr[15] | (hdr[16] << 8);
+    uint32_t total = RECORD_HEADER_SIZE + ref_len + text_len + comm_len;
+    if (total > MAX_RECORD_SIZE) return false;
+
+    int chunk = 0;
+    for (uint32_t pos = 0; pos < total; pos += PERSIST_CHUNK_SIZE, chunk++) {
+        uint32_t want = total - pos;
+        if (want > PERSIST_CHUNK_SIZE) want = PERSIST_CHUNK_SIZE;
+        if (persist_read_data(day_chunk_key(slot, chunk), s_record_buf + pos, want) < (int)want) {
+            return false;
+        }
+    }
+
+    memset(out, 0, sizeof(*out));
+    strncpy(out->date, date_str, sizeof(out->date) - 1);
+    memcpy(out->ref, s_record_buf + RECORD_HEADER_SIZE, ref_len);
+    out->ref[sizeof(out->ref) - 1] = '\0';
+    memcpy(out->text, s_record_buf + RECORD_HEADER_SIZE + ref_len, text_len);
+    out->text[sizeof(out->text) - 1] = '\0';
+    memcpy(out->commentary, s_record_buf + RECORD_HEADER_SIZE + ref_len + text_len, comm_len);
+    out->commentary[sizeof(out->commentary) - 1] = '\0';
+    out->has_data = true;
+    return true;
+}
+
+static bool persist_in_retention_window(const char *date_str) {
+    int y, m, d;
+    if (!parse_date(date_str, &y, &m, &d)) return false;
+    int entry_days = date_to_days(y, m, d);
+    int today_days = date_to_days(s_current_year, s_current_month, s_current_day);
+    return entry_days >= today_days - PAST_DAYS_KEEP &&
+           entry_days <= today_days + s_cache_days;
+}
+
+static void prune_persist_cache(void) {
+    for (int i = 0; i < MAX_PERSIST_SLOTS; i++) {
+        if (!s_persist_dir[i][0]) continue;
+        if (!persist_in_retention_window(s_persist_dir[i])) {
+            delete_persist_slot(i);
+        }
+    }
+}
+
+static void save_day_to_persist(const DayEntry *e) {
+    if (!e || !e->has_data) return;
+    if (persist_find_slot(e->date) >= 0) return;
+    if (!persist_in_retention_window(e->date)) return;
+
+    int slot = persist_free_slot();
+    if (slot < 0) {
+        prune_persist_cache();
+        slot = persist_free_slot();
+    }
+    if (slot < 0) {
+        /* All slots full with in-window days: drop the oldest one. */
+        int oldest = -1;
+        int oldest_days = 0;
+        for (int i = 0; i < MAX_PERSIST_SLOTS; i++) {
+            int y, m, d;
+            if (!parse_date(s_persist_dir[i], &y, &m, &d)) { oldest = i; break; }
+            int dd = date_to_days(y, m, d);
+            if (oldest < 0 || dd < oldest_days) { oldest = i; oldest_days = dd; }
+        }
+        if (oldest < 0) return;
+        delete_persist_slot(oldest);
+        slot = oldest;
+    }
+
+    uint16_t ref_len = (uint16_t)(strlen(e->ref) + 1);
+    uint16_t text_len = (uint16_t)(strlen(e->text) + 1);
+    uint16_t comm_len = (uint16_t)(strlen(e->commentary) + 1);
+
+    memcpy(s_record_buf, e->date, 11);
+    s_record_buf[11] = ref_len & 0xff;
+    s_record_buf[12] = ref_len >> 8;
+    s_record_buf[13] = text_len & 0xff;
+    s_record_buf[14] = text_len >> 8;
+    s_record_buf[15] = comm_len & 0xff;
+    s_record_buf[16] = comm_len >> 8;
+    memcpy(s_record_buf + RECORD_HEADER_SIZE, e->ref, ref_len);
+    memcpy(s_record_buf + RECORD_HEADER_SIZE + ref_len, e->text, text_len);
+    memcpy(s_record_buf + RECORD_HEADER_SIZE + ref_len + text_len, e->commentary, comm_len);
+
+    uint32_t total = RECORD_HEADER_SIZE + ref_len + text_len + comm_len;
+    int chunk = 0;
+    for (uint32_t pos = 0; pos < total; pos += PERSIST_CHUNK_SIZE, chunk++) {
+        uint32_t n = total - pos;
+        if (n > PERSIST_CHUNK_SIZE) n = PERSIST_CHUNK_SIZE;
+        if (persist_write_data(day_chunk_key(slot, chunk), s_record_buf + pos, n) < (int)n) {
+            APP_LOG(APP_LOG_LEVEL_ERROR, "Persist write failed for %s chunk %d", e->date, chunk);
+            for (int j = 0; j <= chunk; j++) persist_delete(day_chunk_key(slot, j));
+            return;
+        }
+    }
+    memcpy(s_persist_dir[slot], e->date, 11);
+}
+
+static void persist_wipe_all(void) {
+    for (int i = 0; i < MAX_PERSIST_SLOTS; i++) {
+        if (s_persist_dir[i][0]) delete_persist_slot(i);
+    }
+}
+
+static DayEntry *alloc_ram_entry(void) {
+    for (int i = 0; i < CACHE_SIZE; i++) {
+        if (!s_cache[i].has_data) return &s_cache[i];
+    }
+    evict_old_entries();
+    for (int i = 0; i < CACHE_SIZE; i++) {
+        if (!s_cache[i].has_data) return &s_cache[i];
+    }
+    /* Still full: evict the entry farthest in the past (never today's). */
+    int victim = -1;
+    int victim_days = 0;
+    int today_days = date_to_days(s_current_year, s_current_month, s_current_day);
+    for (int i = 0; i < CACHE_SIZE; i++) {
+        int y, m, d;
+        if (!parse_date(s_cache[i].date, &y, &m, &d)) { victim = i; break; }
+        int dd = date_to_days(y, m, d);
+        if (dd == today_days) continue;
+        if (victim < 0 || dd < victim_days) { victim = i; victim_days = dd; }
+    }
+    if (victim < 0) return NULL;
+    s_cache[victim].has_data = false;
+    return &s_cache[victim];
+}
+
+static DayEntry *get_day_anywhere(const char *date_str) {
+    DayEntry *e = find_cache_entry(date_str);
+    if (e) return e;
+    if (persist_find_slot(date_str) < 0) return NULL;
+    e = alloc_ram_entry();
+    if (!e) return NULL;
+    if (!load_day_from_persist(date_str, e)) {
+        e->has_data = false;
+        return NULL;
+    }
+    return e;
 }
 
 static void update_ui(void);
@@ -386,6 +611,7 @@ static void tick_handler(struct tm *tick_time, TimeUnits units_changed) {
         s_current_day = tick_time->tm_mday;
         s_days_in_month = days_in_month(s_current_year, s_current_month);
         evict_old_entries();
+        prune_persist_cache();
         s_waiting_for_phone = false;
         update_ui();
         request_from_phone();
@@ -557,7 +783,7 @@ static void load_previous_day(void) {
 
     char prev_date[11];
     add_days_to_date(s_current_year, s_current_month, s_current_day, -1, prev_date, sizeof(prev_date));
-    DayEntry *e = find_cache_entry(prev_date);
+    DayEntry *e = get_day_anywhere(prev_date);
 
     if (!e) {
         s_current_day--;
@@ -912,7 +1138,7 @@ static void request_bulk_sync(const char *start_date) {
         s_sync_in_progress = false;
         return;
     }
-    add_days_to_date(year, month, day, FUTURE_DAYS_PREFETCH, end_date, sizeof(end_date));
+    add_days_to_date(year, month, day, s_cache_days, end_date, sizeof(end_date));
     
     DictionaryIterator *iter;
     AppMessageResult result = app_message_outbox_begin(&iter);
@@ -936,13 +1162,13 @@ static void request_from_phone(void) {
     char date_str[11];
     snprintf(date_str, sizeof(date_str), "%d-%02d-%02d", s_current_year, s_current_month, s_current_day);
     
-    DayEntry *cached = find_cache_entry(date_str);
+    DayEntry *cached = get_day_anywhere(date_str);
     if (cached) {
         s_waiting_for_phone = false;
         update_ui();
-        
+
         int future_count = count_future_cached_days(date_str);
-        if (future_count < FUTURE_DAYS_PREFETCH) {
+        if (future_count < s_cache_days) {
             request_bulk_sync(date_str);
         }
         return;
@@ -982,30 +1208,11 @@ static void inbox_received_handler(DictionaryIterator *iter, void *context) {
         if (!date_t || !ref_t || !text_t || !comm_t) return;
 
         const char *date_str = date_t->value->cstring;
-        
-        DayEntry *existing = find_cache_entry(date_str);
-        DayEntry *e = existing;
-        
-        if (!e) {
-            for (int i = 0; i < CACHE_SIZE; i++) {
-                if (!s_cache[i].has_data) {
-                    e = &s_cache[i];
-                    break;
-                }
-            }
-            if (!e) {
-                evict_old_entries();
-                for (int i = 0; i < CACHE_SIZE; i++) {
-                    if (!s_cache[i].has_data) {
-                        e = &s_cache[i];
-                        break;
-                    }
-                }
-            }
-        }
-        
+
+        DayEntry *e = find_cache_entry(date_str);
+        if (!e) e = alloc_ram_entry();
         if (!e) return;
-        
+
         strncpy(e->date, date_str, sizeof(e->date) - 1);
         e->date[sizeof(e->date) - 1] = '\0';
         strncpy(e->ref, ref_t->value->cstring, sizeof(e->ref) - 1);
@@ -1015,8 +1222,8 @@ static void inbox_received_handler(DictionaryIterator *iter, void *context) {
         strncpy(e->commentary, comm_t->value->cstring, sizeof(e->commentary) - 1);
         e->commentary[sizeof(e->commentary) - 1] = '\0';
         e->has_data = true;
-        
-        save_cache_to_persist();
+
+        save_day_to_persist(e);
 
         int year, month, day;
         if (parse_date(date_str, &year, &month, &day)) {
@@ -1072,12 +1279,12 @@ static void inbox_received_handler(DictionaryIterator *iter, void *context) {
         }
         if (cd_t) {
             s_cache_days = cd_t->value->int32;
-            if (s_cache_days < 1) s_cache_days = 1;
-            if (s_cache_days > CACHE_SIZE) s_cache_days = CACHE_SIZE;
+            if (s_cache_days < MIN_WATCH_CACHE_DAYS) s_cache_days = MIN_WATCH_CACHE_DAYS;
+            if (s_cache_days > MAX_WATCH_CACHE_DAYS) s_cache_days = MAX_WATCH_CACHE_DAYS;
             persist_write_int(PERSIST_KEY_CACHE_DAYS, s_cache_days);
         }
         for (int i = 0; i < CACHE_SIZE; i++) s_cache[i].has_data = false;
-        save_cache_to_persist();
+        persist_wipe_all();
         s_waiting_for_phone = true;
         update_ui();
         request_from_phone();
@@ -1188,8 +1395,6 @@ static void init(void) {
     s_waiting_for_phone = false;
 
     for (int i = 0; i < CACHE_SIZE; i++) s_cache[i].has_data = false;
-    load_cache_from_persist();
-    evict_old_entries();
 
     char def_lang[8], def_lib[16], def_rsconf[8];
     detect_device_language(def_lang, sizeof(def_lang), def_lib, sizeof(def_lib), def_rsconf, sizeof(def_rsconf));
@@ -1215,10 +1420,25 @@ static void init(void) {
     if (persist_exists(PERSIST_KEY_CACHE_DAYS)) {
         s_cache_days = persist_read_int(PERSIST_KEY_CACHE_DAYS);
     } else {
-        s_cache_days = 7;
+        s_cache_days = DEFAULT_WATCH_CACHE_DAYS;
     }
-    if (s_cache_days < 1) s_cache_days = 1;
-    if (s_cache_days > CACHE_SIZE) s_cache_days = CACHE_SIZE;
+    if (s_cache_days < MIN_WATCH_CACHE_DAYS) s_cache_days = MIN_WATCH_CACHE_DAYS;
+    if (s_cache_days > MAX_WATCH_CACHE_DAYS) s_cache_days = MAX_WATCH_CACHE_DAYS;
+
+    /* Remove the legacy single-blob cache (firmware truncated it to 256 bytes,
+       so it only ever held a corrupt fragment), then load the chunked cache. */
+    persist_delete(PERSIST_KEY_CACHE);
+    persist_dir_load();
+    prune_persist_cache();
+
+    /* Preload today (and tomorrow) from persist so the UI is instant and the
+       app works with no phone connection at all. */
+    char date_str[11];
+    snprintf(date_str, sizeof(date_str), "%d-%02d-%02d", s_current_year, s_current_month, s_current_day);
+    get_day_anywhere(date_str);
+    char next_date[11];
+    add_days_to_date(s_current_year, s_current_month, s_current_day, 1, next_date, sizeof(next_date));
+    get_day_anywhere(next_date);
 
     tick_timer_service_subscribe(MINUTE_UNIT, tick_handler);
 
