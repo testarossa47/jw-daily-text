@@ -22,6 +22,8 @@
 #define KEY_ACTION_SYNC_RANGE MESSAGE_KEY_action_sync_range
 #define KEY_START_DATE MESSAGE_KEY_start_date
 #define KEY_END_DATE MESSAGE_KEY_end_date
+#define KEY_TEXT_SIZE MESSAGE_KEY_text_size
+#define KEY_LANGUAGE_LIST MESSAGE_KEY_language_list
 
 #define PERSIST_KEY_LANGUAGE 1
 #define PERSIST_KEY_CACHE_DAYS 2
@@ -30,15 +32,42 @@
 /* Key 5 held a legacy single-blob cache that the firmware silently truncated
    (persist values are capped at 256 bytes); it is deleted on boot. */
 #define PERSIST_KEY_CACHE 5
-#define PERSIST_KEY_DAY_BASE 100
-#define CACHE_SIZE 25
+#define PERSIST_KEY_TEXT_SIZE 6
+#define PERSIST_KEY_LANG_LIST 7
+#define PERSIST_KEY_MIGRATED 8
+/* Day records moved from base 100 (no language tag) to base 500 (language
+   tag in the record header) in 2.4.0; the legacy range is wiped once. */
+#define LEGACY_PERSIST_KEY_DAY_BASE 100
+#define LEGACY_MAX_PERSIST_SLOTS 40
+#define PERSIST_KEY_DAY_BASE 500
+
+#if defined(PBL_PLATFORM_APLITE)
+  /* First-generation Pebbles have 24 KiB app RAM. Persist carries the
+     offline cache; RAM holds only the visible day. The record scratch buffer
+     is also reused for rendered body text. */
+  #define CACHE_SIZE 1
+  #define ENTRY_REF_SIZE 64
+  #define ENTRY_TEXT_SIZE 512
+  #define ENTRY_COMMENTARY_SIZE 1152
+  #define APPMSG_INBOX_SIZE 2048
+  #define APPMSG_OUTBOX_SIZE 256
+  #define MAX_WATCH_CACHE_DAYS 7
+#else
+  #define CACHE_SIZE 20
+  #define ENTRY_REF_SIZE 64
+  #define ENTRY_TEXT_SIZE 512
+  #define ENTRY_COMMENTARY_SIZE 1152
+  #define BODY_TEXT_SIZE 2200
+  #define APPMSG_INBOX_SIZE 8192
+  #define APPMSG_OUTBOX_SIZE 512
+  #define MAX_WATCH_CACHE_DAYS 30
+#endif
 #define PAST_DAYS_KEEP 7
 #define MIN_WATCH_CACHE_DAYS 7
-#define MAX_WATCH_CACHE_DAYS 30
 #define DEFAULT_WATCH_CACHE_DAYS MAX_WATCH_CACHE_DAYS
 #define PERSIST_CHUNK_SIZE 256
 #define MAX_CHUNKS_PER_DAY 8
-#define MAX_PERSIST_SLOTS (PAST_DAYS_KEEP + 1 + MAX_WATCH_CACHE_DAYS + 2)
+#define MAX_PERSIST_SLOTS 40
 #define SCROLL_INCREMENT 36
 #define SCROLL_REPEAT_INTERVAL_MS 220
 #define ARROW_HEIGHT 19
@@ -48,8 +77,12 @@
 #define LOADING_FILL_DURATION_MS 2400
 #define LOADING_DONE_DURATION_MS 180
 #define TOUCH_SWAP_THRESHOLD 50
+#define MAX_LANG_LIST 4
+#define LANG_SIZE 12
 
-#define COLOR_BANNER PBL_IF_COLOR_ELSE(GColorIndigo, GColorDarkGray)
+#define BODY_MARGIN PBL_IF_ROUND_ELSE(12, 4)
+
+#define COLOR_BANNER PBL_IF_COLOR_ELSE(GColorIndigo, GColorBlack)
 #define COLOR_BANNER_TEXT GColorWhite
 #define COLOR_NEXT_BAR COLOR_BANNER
 #define COLOR_NEXT_BAR_TEXT GColorWhite
@@ -57,16 +90,26 @@
 typedef struct {
     bool has_data;
     char date[11];
-    char ref[64];
-    char text[512];
-    char commentary[1152];
+    char lang[LANG_SIZE];
+    char ref[ENTRY_REF_SIZE];
+    char text[ENTRY_TEXT_SIZE];
+    char commentary[ENTRY_COMMENTARY_SIZE];
 } DayEntry;
+
+typedef struct {
+    char lang[LANG_SIZE];
+    char lib[12];
+    char rsconf[4];
+    char name[24];
+} LangInfo;
 
 static const int ACTION_FETCH = 1;
 static const int ACTION_FETCH_RESULT = 2;
 static const int ACTION_FETCH_ERROR = 3;
 static const int ACTION_LANGUAGE_CHANGED = 4;
 static const int ACTION_SYNC_RANGE = 5;
+static const int ACTION_LANG_LIST = 6;
+static const int ACTION_SETTINGS = 7;
 
 static Window *s_window;
 static ScrollLayer *s_scroll_layer;
@@ -91,10 +134,16 @@ static int s_days_in_month;
 static int s_current_year;
 static int s_current_month;
 static bool s_waiting_for_phone;
-static char s_language[8];
+static char s_language[LANG_SIZE];
 static char s_lib[16];
 static char s_rsconf[8];
 static int s_cache_days;
+static int s_text_size; /* 0 = standard, 1 = small */
+
+static LangInfo s_lang_list[MAX_LANG_LIST];
+static int s_lang_count = 0;
+static Window *s_menu_window;
+static MenuLayer *s_menu_layer;
 
 static DayEntry s_cache[CACHE_SIZE];
 static bool s_sync_in_progress = false;
@@ -103,24 +152,32 @@ static int s_scroll_anim_start_y = 0;
 static int s_scroll_anim_target_y = 0;
 static AnimationImplementation s_scroll_anim_impl;
 
-static DayEntry *get_day_anywhere(const char *date_str);
+static DayEntry *get_day_anywhere(const char *date_str, const char *lang);
 static DayEntry *alloc_ram_entry(void);
-static int persist_find_slot(const char *date_str);
+static int persist_find_slot(const char *date_str, const char *lang);
 static void persist_dir_load(void);
 static void persist_wipe_all(void);
 static void prune_persist_cache(void);
-static void save_day_to_persist(const DayEntry *e);
+static bool persist_in_retention_window(const char *date_str);
+static void save_day_to_persist(const char *date, const char *lang,
+                                const char *ref, const char *text,
+                                const char *commentary);
+static void update_ui(void);
+static void request_from_phone(void);
+static void reset_scroll_to_top(void);
 
 static DayEntry *current_entry(void) {
     char date_str[11];
     snprintf(date_str, sizeof(date_str), "%d-%02d-%02d", s_current_year, s_current_month, s_current_day);
 
-    return get_day_anywhere(date_str);
+    return get_day_anywhere(date_str, s_language);
 }
 
-static DayEntry *find_cache_entry(const char *date_str) {
+static DayEntry *find_cache_entry(const char *date_str, const char *lang) {
     for (int i = 0; i < CACHE_SIZE; i++) {
-        if (s_cache[i].has_data && strcmp(s_cache[i].date, date_str) == 0) {
+        if (s_cache[i].has_data &&
+            strcmp(s_cache[i].date, date_str) == 0 &&
+            strcmp(s_cache[i].lang, lang) == 0) {
             return &s_cache[i];
         }
     }
@@ -324,8 +381,14 @@ static int parse_date(const char *date_str, int *year, int *month, int *day) {
     return (*year > 0 && *month >= 1 && *month <= 12 && *day >= 1 && *day <= 31);
 }
 
-static bool day_is_cached(const char *date_str) {
-    return find_cache_entry(date_str) != NULL || persist_find_slot(date_str) >= 0;
+static bool day_is_cached(const char *date_str, const char *lang) {
+    return find_cache_entry(date_str, lang) != NULL || persist_find_slot(date_str, lang) >= 0;
+}
+
+static int future_days_per_language(void) {
+    int languages = s_lang_count > 0 ? s_lang_count : 1;
+    int days = (s_cache_days + 1) / languages - 1;
+    return days < 1 ? 1 : days;
 }
 
 static int count_future_cached_days(const char *from_date) {
@@ -336,8 +399,9 @@ static int count_future_cached_days(const char *from_date) {
     char next_date[11];
     add_days_to_date(year, month, day, 1, next_date, sizeof(next_date));
 
-    while (count < s_cache_days) {
-        if (!day_is_cached(next_date)) break;
+    int target = future_days_per_language();
+    while (count < target) {
+        if (!day_is_cached(next_date, s_language)) break;
         count++;
 
         int y, m, d;
@@ -367,18 +431,28 @@ static void evict_old_entries(void) {
 /* Persistent day cache. Firmware caps each persist value at 256 bytes, so a
    day is stored as a packed record split into chunks across consecutive keys:
    key = PERSIST_KEY_DAY_BASE + slot * MAX_CHUNKS_PER_DAY + chunk.
-   Record layout: date[11] | ref_len u16 | text_len u16 | comm_len u16
-   (lengths include the NUL), then ref, text, commentary. */
+   Record layout: date[11] | lang[LANG_SIZE] | ref_len u16 | text_len u16 | comm_len
+   u16 (lengths include the NUL), then ref, text, commentary. Multiple
+   languages coexist; each record carries its language. */
 
-#define RECORD_HEADER_SIZE 17
+#define RECORD_HEADER_SIZE (11 + LANG_SIZE + 6)
 #define MAX_RECORD_SIZE (RECORD_HEADER_SIZE + sizeof(((DayEntry *)0)->ref) + \
                          sizeof(((DayEntry *)0)->text) + sizeof(((DayEntry *)0)->commentary))
 
-static char s_persist_dir[MAX_PERSIST_SLOTS][11];
+typedef struct {
+    char date[11];
+    char lang[LANG_SIZE];
+} PersistDirEntry;
+
+static PersistDirEntry s_persist_dir[MAX_PERSIST_SLOTS];
 static uint8_t s_record_buf[MAX_RECORD_SIZE];
 
 static uint32_t day_chunk_key(int slot, int chunk) {
     return PERSIST_KEY_DAY_BASE + (uint32_t)slot * MAX_CHUNKS_PER_DAY + (uint32_t)chunk;
+}
+
+static uint32_t legacy_day_chunk_key(int slot, int chunk) {
+    return LEGACY_PERSIST_KEY_DAY_BASE + (uint32_t)slot * MAX_CHUNKS_PER_DAY + (uint32_t)chunk;
 }
 
 static bool valid_stored_date(const char *d) {
@@ -394,16 +468,29 @@ static bool valid_stored_date(const char *d) {
     return d[10] == '\0';
 }
 
-static int persist_find_slot(const char *date_str) {
+static bool valid_stored_lang(const char *l) {
+    int len = 0;
+    for (int i = 0; i < LANG_SIZE; i++) {
+        char c = l[i];
+        if (c == '\0') break;
+        if (!((c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '-' || c == '_')) return false;
+        len++;
+    }
+    return len >= 1 && len < LANG_SIZE;
+}
+
+static int persist_find_slot(const char *date_str, const char *lang) {
     for (int i = 0; i < MAX_PERSIST_SLOTS; i++) {
-        if (s_persist_dir[i][0] && strcmp(s_persist_dir[i], date_str) == 0) return i;
+        if (s_persist_dir[i].date[0] &&
+            strcmp(s_persist_dir[i].date, date_str) == 0 &&
+            strcmp(s_persist_dir[i].lang, lang) == 0) return i;
     }
     return -1;
 }
 
 static int persist_free_slot(void) {
     for (int i = 0; i < MAX_PERSIST_SLOTS; i++) {
-        if (!s_persist_dir[i][0]) return i;
+        if (!s_persist_dir[i].date[0]) return i;
     }
     return -1;
 }
@@ -412,7 +499,7 @@ static void delete_persist_slot(int slot) {
     for (int j = 0; j < MAX_CHUNKS_PER_DAY; j++) {
         persist_delete(day_chunk_key(slot, j));
     }
-    s_persist_dir[slot][0] = '\0';
+    s_persist_dir[slot].date[0] = '\0';
 }
 
 static void persist_dir_load(void) {
@@ -422,27 +509,110 @@ static void persist_dir_load(void) {
     for (int i = 0; i < MAX_PERSIST_SLOTS; i++) {
         if (persist_read_data(day_chunk_key(i, 0), hdr, sizeof(hdr)) < (int)sizeof(hdr)) continue;
         if (!valid_stored_date((const char *)hdr)) continue;
-        uint16_t ref_len = hdr[11] | (hdr[12] << 8);
-        uint16_t text_len = hdr[13] | (hdr[14] << 8);
-        uint16_t comm_len = hdr[15] | (hdr[16] << 8);
+        if (!valid_stored_lang((const char *)hdr + 11)) continue;
+        uint16_t ref_len = hdr[11 + LANG_SIZE] | (hdr[12 + LANG_SIZE] << 8);
+        uint16_t text_len = hdr[13 + LANG_SIZE] | (hdr[14 + LANG_SIZE] << 8);
+        uint16_t comm_len = hdr[15 + LANG_SIZE] | (hdr[16 + LANG_SIZE] << 8);
         if (ref_len < 1 || ref_len > sizeof(((DayEntry *)0)->ref)) continue;
         if (text_len < 1 || text_len > sizeof(((DayEntry *)0)->text)) continue;
         if (comm_len < 1 || comm_len > sizeof(((DayEntry *)0)->commentary)) continue;
-        memcpy(s_persist_dir[i], hdr, 11);
+        memcpy(s_persist_dir[i].date, hdr, 11);
+        memcpy(s_persist_dir[i].lang, hdr + 11, LANG_SIZE);
         count++;
     }
     APP_LOG(APP_LOG_LEVEL_INFO, "Persist dir loaded %d days", count);
 }
 
-static bool load_day_from_persist(const char *date_str, DayEntry *out) {
-    int slot = persist_find_slot(date_str);
+/* Associate pre-2.4.0 records with the persisted current language instead of
+   discarding a user's offline cache during upgrade. */
+static bool migrate_legacy_cache(void) {
+    bool all_done = true;
+    for (int old_slot = 0; old_slot < LEGACY_MAX_PERSIST_SLOTS; old_slot++) {
+        bool migrated = false;
+        bool remove_legacy = true;
+#if !defined(PBL_PLATFORM_APLITE)
+        const int old_header_size = 17;
+        uint8_t hdr[17];
+        if (persist_read_data(legacy_day_chunk_key(old_slot, 0), hdr, sizeof(hdr)) == (int)sizeof(hdr) &&
+            valid_stored_date((const char *)hdr)) {
+            uint16_t ref_len = hdr[11] | (hdr[12] << 8);
+            uint16_t text_len = hdr[13] | (hdr[14] << 8);
+            uint16_t comm_len = hdr[15] | (hdr[16] << 8);
+            uint32_t old_total = old_header_size + ref_len + text_len + comm_len;
+            if (ref_len >= 1 && ref_len <= ENTRY_REF_SIZE &&
+                text_len >= 1 && text_len <= ENTRY_TEXT_SIZE &&
+                comm_len >= 1 && comm_len <= ENTRY_COMMENTARY_SIZE &&
+                old_total + (RECORD_HEADER_SIZE - old_header_size) <= MAX_RECORD_SIZE &&
+                persist_in_retention_window((const char *)hdr)) {
+                bool complete = true;
+                int chunk = 0;
+                for (uint32_t pos = 0; pos < old_total; pos += PERSIST_CHUNK_SIZE, chunk++) {
+                    uint32_t n = old_total - pos;
+                    if (n > PERSIST_CHUNK_SIZE) n = PERSIST_CHUNK_SIZE;
+                    if (persist_read_data(legacy_day_chunk_key(old_slot, chunk), s_record_buf + pos, n) < (int)n) {
+                        complete = false;
+                        break;
+                    }
+                }
+                int new_slot = persist_free_slot();
+                if (complete && new_slot < 0) {
+                    remove_legacy = false;
+                    all_done = false;
+                } else if (complete) {
+                    memmove(s_record_buf + RECORD_HEADER_SIZE,
+                            s_record_buf + old_header_size,
+                            old_total - old_header_size);
+                    memset(s_record_buf + 11, 0, LANG_SIZE);
+                    strncpy((char *)s_record_buf + 11, s_language, LANG_SIZE - 1);
+                    s_record_buf[11 + LANG_SIZE] = ref_len & 0xff;
+                    s_record_buf[12 + LANG_SIZE] = ref_len >> 8;
+                    s_record_buf[13 + LANG_SIZE] = text_len & 0xff;
+                    s_record_buf[14 + LANG_SIZE] = text_len >> 8;
+                    s_record_buf[15 + LANG_SIZE] = comm_len & 0xff;
+                    s_record_buf[16 + LANG_SIZE] = comm_len >> 8;
+                    uint32_t new_total = old_total + RECORD_HEADER_SIZE - old_header_size;
+                    migrated = true;
+                    chunk = 0;
+                    for (uint32_t pos = 0; pos < new_total; pos += PERSIST_CHUNK_SIZE, chunk++) {
+                        uint32_t n = new_total - pos;
+                        if (n > PERSIST_CHUNK_SIZE) n = PERSIST_CHUNK_SIZE;
+                        if (persist_write_data(day_chunk_key(new_slot, chunk), s_record_buf + pos, n) < (int)n) {
+                            migrated = false;
+                            remove_legacy = false;
+                            all_done = false;
+                            for (int j = 0; j <= chunk; j++) persist_delete(day_chunk_key(new_slot, j));
+                            break;
+                        }
+                    }
+                    if (migrated) {
+                        memcpy(s_persist_dir[new_slot].date, hdr, 11);
+                        snprintf(s_persist_dir[new_slot].lang, sizeof(s_persist_dir[new_slot].lang), "%s", s_language);
+                    }
+                }
+            }
+        }
+#endif
+        /* Unsupported/out-of-window records are removed. Write failures keep
+           the source so migration can retry on the next launch. */
+        if (remove_legacy) {
+            for (int chunk = 0; chunk < MAX_CHUNKS_PER_DAY; chunk++) {
+                persist_delete(legacy_day_chunk_key(old_slot, chunk));
+            }
+        }
+        (void)migrated;
+    }
+    return all_done;
+}
+
+static bool load_day_from_persist(const char *date_str, const char *lang, DayEntry *out) {
+    int slot = persist_find_slot(date_str, lang);
     if (slot < 0) return false;
 
     uint8_t hdr[RECORD_HEADER_SIZE];
     if (persist_read_data(day_chunk_key(slot, 0), hdr, sizeof(hdr)) < (int)sizeof(hdr)) return false;
-    uint16_t ref_len = hdr[11] | (hdr[12] << 8);
-    uint16_t text_len = hdr[13] | (hdr[14] << 8);
-    uint16_t comm_len = hdr[15] | (hdr[16] << 8);
+    uint16_t ref_len = hdr[11 + LANG_SIZE] | (hdr[12 + LANG_SIZE] << 8);
+    uint16_t text_len = hdr[13 + LANG_SIZE] | (hdr[14 + LANG_SIZE] << 8);
+    uint16_t comm_len = hdr[15 + LANG_SIZE] | (hdr[16 + LANG_SIZE] << 8);
     uint32_t total = RECORD_HEADER_SIZE + ref_len + text_len + comm_len;
     if (total > MAX_RECORD_SIZE) return false;
 
@@ -457,6 +627,7 @@ static bool load_day_from_persist(const char *date_str, DayEntry *out) {
 
     memset(out, 0, sizeof(*out));
     strncpy(out->date, date_str, sizeof(out->date) - 1);
+    strncpy(out->lang, lang, sizeof(out->lang) - 1);
     memcpy(out->ref, s_record_buf + RECORD_HEADER_SIZE, ref_len);
     out->ref[sizeof(out->ref) - 1] = '\0';
     memcpy(out->text, s_record_buf + RECORD_HEADER_SIZE + ref_len, text_len);
@@ -472,23 +643,42 @@ static bool persist_in_retention_window(const char *date_str) {
     if (!parse_date(date_str, &y, &m, &d)) return false;
     int entry_days = date_to_days(y, m, d);
     int today_days = date_to_days(s_current_year, s_current_month, s_current_day);
-    return entry_days >= today_days - PAST_DAYS_KEEP &&
-           entry_days <= today_days + s_cache_days;
+    int languages = s_lang_count > 0 ? s_lang_count : 1;
+    int past_days = PAST_DAYS_KEEP / languages;
+    int future_days = (s_cache_days + 1) / languages - 1;
+    if (past_days < 1) past_days = 1;
+    if (future_days < 1) future_days = 1;
+    return entry_days >= today_days - past_days &&
+           entry_days <= today_days + future_days;
 }
 
 static void prune_persist_cache(void) {
     for (int i = 0; i < MAX_PERSIST_SLOTS; i++) {
-        if (!s_persist_dir[i][0]) continue;
-        if (!persist_in_retention_window(s_persist_dir[i])) {
+        if (!s_persist_dir[i].date[0]) continue;
+        if (!persist_in_retention_window(s_persist_dir[i].date)) {
             delete_persist_slot(i);
         }
     }
 }
 
-static void save_day_to_persist(const DayEntry *e) {
-    if (!e || !e->has_data) return;
-    if (persist_find_slot(e->date) >= 0) return;
-    if (!persist_in_retention_window(e->date)) return;
+static size_t utf8_prefix_len(const char *s, size_t max_bytes) {
+    size_t n = strlen(s);
+    if (n <= max_bytes) return n;
+    n = max_bytes;
+    while (n > 0 && (((uint8_t)s[n] & 0xc0) == 0x80)) n--;
+    return n;
+}
+
+static uint16_t stored_string_len(const char *s, size_t capacity) {
+    size_t n = utf8_prefix_len(s, capacity - 1);
+    return (uint16_t)(n + 1);
+}
+
+static void save_day_to_persist(const char *date, const char *lang,
+                                const char *ref, const char *text,
+                                const char *commentary) {
+    if (persist_find_slot(date, lang) >= 0) return;
+    if (!persist_in_retention_window(date)) return;
 
     int slot = persist_free_slot();
     if (slot < 0) {
@@ -501,7 +691,7 @@ static void save_day_to_persist(const DayEntry *e) {
         int oldest_days = 0;
         for (int i = 0; i < MAX_PERSIST_SLOTS; i++) {
             int y, m, d;
-            if (!parse_date(s_persist_dir[i], &y, &m, &d)) { oldest = i; break; }
+            if (!parse_date(s_persist_dir[i].date, &y, &m, &d)) { oldest = i; break; }
             int dd = date_to_days(y, m, d);
             if (oldest < 0 || dd < oldest_days) { oldest = i; oldest_days = dd; }
         }
@@ -510,20 +700,28 @@ static void save_day_to_persist(const DayEntry *e) {
         slot = oldest;
     }
 
-    uint16_t ref_len = (uint16_t)(strlen(e->ref) + 1);
-    uint16_t text_len = (uint16_t)(strlen(e->text) + 1);
-    uint16_t comm_len = (uint16_t)(strlen(e->commentary) + 1);
+    uint16_t ref_len = stored_string_len(ref, ENTRY_REF_SIZE);
+    uint16_t text_len = stored_string_len(text, ENTRY_TEXT_SIZE);
+    uint16_t comm_len = stored_string_len(commentary, ENTRY_COMMENTARY_SIZE);
 
-    memcpy(s_record_buf, e->date, 11);
-    s_record_buf[11] = ref_len & 0xff;
-    s_record_buf[12] = ref_len >> 8;
-    s_record_buf[13] = text_len & 0xff;
-    s_record_buf[14] = text_len >> 8;
-    s_record_buf[15] = comm_len & 0xff;
-    s_record_buf[16] = comm_len >> 8;
-    memcpy(s_record_buf + RECORD_HEADER_SIZE, e->ref, ref_len);
-    memcpy(s_record_buf + RECORD_HEADER_SIZE + ref_len, e->text, text_len);
-    memcpy(s_record_buf + RECORD_HEADER_SIZE + ref_len + text_len, e->commentary, comm_len);
+    memset(s_record_buf, 0, RECORD_HEADER_SIZE);
+    memcpy(s_record_buf, date, 11);
+    strncpy((char *)s_record_buf + 11, lang, LANG_SIZE - 1);
+    s_record_buf[11 + LANG_SIZE] = ref_len & 0xff;
+    s_record_buf[12 + LANG_SIZE] = ref_len >> 8;
+    s_record_buf[13 + LANG_SIZE] = text_len & 0xff;
+    s_record_buf[14 + LANG_SIZE] = text_len >> 8;
+    s_record_buf[15 + LANG_SIZE] = comm_len & 0xff;
+    s_record_buf[16 + LANG_SIZE] = comm_len >> 8;
+    uint32_t pos = RECORD_HEADER_SIZE;
+    memcpy(s_record_buf + pos, ref, ref_len - 1);
+    s_record_buf[pos + ref_len - 1] = '\0';
+    pos += ref_len;
+    memcpy(s_record_buf + pos, text, text_len - 1);
+    s_record_buf[pos + text_len - 1] = '\0';
+    pos += text_len;
+    memcpy(s_record_buf + pos, commentary, comm_len - 1);
+    s_record_buf[pos + comm_len - 1] = '\0';
 
     uint32_t total = RECORD_HEADER_SIZE + ref_len + text_len + comm_len;
     int chunk = 0;
@@ -531,17 +729,43 @@ static void save_day_to_persist(const DayEntry *e) {
         uint32_t n = total - pos;
         if (n > PERSIST_CHUNK_SIZE) n = PERSIST_CHUNK_SIZE;
         if (persist_write_data(day_chunk_key(slot, chunk), s_record_buf + pos, n) < (int)n) {
-            APP_LOG(APP_LOG_LEVEL_ERROR, "Persist write failed for %s chunk %d", e->date, chunk);
+            APP_LOG(APP_LOG_LEVEL_ERROR, "Persist write failed for %s chunk %d", date, chunk);
             for (int j = 0; j <= chunk; j++) persist_delete(day_chunk_key(slot, j));
             return;
         }
     }
-    memcpy(s_persist_dir[slot], e->date, 11);
+    memcpy(s_persist_dir[slot].date, date, 11);
+    snprintf(s_persist_dir[slot].lang, sizeof(s_persist_dir[slot].lang), "%s", lang);
 }
 
 static void persist_wipe_all(void) {
     for (int i = 0; i < MAX_PERSIST_SLOTS; i++) {
-        if (s_persist_dir[i][0]) delete_persist_slot(i);
+        if (s_persist_dir[i].date[0]) delete_persist_slot(i);
+    }
+}
+
+static bool lang_in_list(const char *lang) {
+    for (int i = 0; i < s_lang_count; i++) {
+        if (strcmp(s_lang_list[i].lang, lang) == 0) return true;
+    }
+    return false;
+}
+
+/* Drop days in languages that are no longer wanted (the current language is
+   always kept). Used when the phone sends a new language list. */
+static void purge_languages_not_in_list(void) {
+    if (s_lang_count == 0) return;
+    for (int i = 0; i < CACHE_SIZE; i++) {
+        if (!s_cache[i].has_data) continue;
+        if (!lang_in_list(s_cache[i].lang) && strcmp(s_cache[i].lang, s_language) != 0) {
+            s_cache[i].has_data = false;
+        }
+    }
+    for (int i = 0; i < MAX_PERSIST_SLOTS; i++) {
+        if (!s_persist_dir[i].date[0]) continue;
+        if (!lang_in_list(s_persist_dir[i].lang) && strcmp(s_persist_dir[i].lang, s_language) != 0) {
+            delete_persist_slot(i);
+        }
     }
 }
 
@@ -553,7 +777,8 @@ static DayEntry *alloc_ram_entry(void) {
     for (int i = 0; i < CACHE_SIZE; i++) {
         if (!s_cache[i].has_data) return &s_cache[i];
     }
-    /* Still full: evict the entry farthest in the past (never today's). */
+    /* Keep today's current-language entry visible; another language's today
+       can be evicted and reloaded from persist when the user switches. */
     int victim = -1;
     int victim_days = 0;
     int today_days = date_to_days(s_current_year, s_current_month, s_current_day);
@@ -561,7 +786,7 @@ static DayEntry *alloc_ram_entry(void) {
         int y, m, d;
         if (!parse_date(s_cache[i].date, &y, &m, &d)) { victim = i; break; }
         int dd = date_to_days(y, m, d);
-        if (dd == today_days) continue;
+        if (dd == today_days && strcmp(s_cache[i].lang, s_language) == 0) continue;
         if (victim < 0 || dd < victim_days) { victim = i; victim_days = dd; }
     }
     if (victim < 0) return NULL;
@@ -569,23 +794,123 @@ static DayEntry *alloc_ram_entry(void) {
     return &s_cache[victim];
 }
 
-static DayEntry *get_day_anywhere(const char *date_str) {
-    DayEntry *e = find_cache_entry(date_str);
+static DayEntry *get_day_anywhere(const char *date_str, const char *lang) {
+    DayEntry *e = find_cache_entry(date_str, lang);
     if (e) return e;
-    if (persist_find_slot(date_str) < 0) return NULL;
+    if (persist_find_slot(date_str, lang) < 0) return NULL;
     e = alloc_ram_entry();
     if (!e) return NULL;
-    if (!load_day_from_persist(date_str, e)) {
+    if (!load_day_from_persist(date_str, lang, e)) {
         e->has_data = false;
         return NULL;
     }
     return e;
 }
 
-static void update_ui(void);
-static void request_from_phone(void);
+/* Body font from the text-size setting (issue #15): 0 = standard, 1 = small
+   (roughly the size the official Pebble weather app uses). */
+static GFont body_font(void) {
+    return fonts_get_system_font(s_text_size == 1 ? FONT_KEY_GOTHIC_24 : FONT_KEY_GOTHIC_28);
+}
+
+static void copy_trunc(char *dst, size_t dst_size, const char *src) {
+    size_t n = utf8_prefix_len(src, dst_size - 1);
+    memcpy(dst, src, n);
+    dst[n] = '\0';
+}
+
+/* Language switch list (issue #16). The phone sends a CSV:
+   "lang|lib|rsconf|Name;lang|lib|rsconf|Name;..." including the primary
+   language. Two or more entries enable the SELECT-button language menu. */
+static void apply_lang_list(const char *csv) {
+    s_lang_count = 0;
+    if (!csv || !csv[0]) return;
+    char buf[176];
+    snprintf(buf, sizeof(buf), "%s", csv);
+    char *p = buf;
+    while (*p && s_lang_count < MAX_LANG_LIST) {
+        /* One entry: lang|lib|rsconf|Name (name optional), ended by ';' */
+        char *fields[4] = {NULL, NULL, NULL, NULL};
+        int f = 0;
+        fields[f++] = p;
+        for (; *p && *p != ';'; p++) {
+            if (*p == '|' && f < 4) {
+                *p = '\0';
+                fields[f++] = p + 1;
+            }
+        }
+        if (*p == ';') {
+            *p = '\0';
+            p++;
+        }
+        if (fields[1] && fields[2] && valid_stored_lang(fields[0])) {
+            LangInfo *li = &s_lang_list[s_lang_count++];
+            copy_trunc(li->lang, sizeof(li->lang), fields[0]);
+            copy_trunc(li->lib, sizeof(li->lib), fields[1]);
+            copy_trunc(li->rsconf, sizeof(li->rsconf), fields[2]);
+            copy_trunc(li->name, sizeof(li->name), (fields[3] && fields[3][0]) ? fields[3] : fields[0]);
+        }
+    }
+}
+
+static void switch_language_to(int idx) {
+    if (idx < 0 || idx >= s_lang_count) return;
+    LangInfo *li = &s_lang_list[idx];
+    if (strcmp(li->lang, s_language) == 0) return;
+    snprintf(s_language, sizeof(s_language), "%s", li->lang);
+    snprintf(s_lib, sizeof(s_lib), "%s", li->lib);
+    snprintf(s_rsconf, sizeof(s_rsconf), "%s", li->rsconf);
+    persist_write_string(PERSIST_KEY_LANGUAGE, s_language);
+    persist_write_string(PERSIST_KEY_LIB, s_lib);
+    persist_write_string(PERSIST_KEY_RSCONF, s_rsconf);
+    s_waiting_for_phone = false;
+    reset_scroll_to_top();
+    update_ui();
+    request_from_phone();
+}
+
+static uint16_t menu_get_num_rows(MenuLayer *menu_layer, uint16_t section_index, void *context) {
+    return s_lang_count;
+}
+
+static void menu_draw_row(GContext *ctx, const Layer *cell_layer, MenuIndex *cell_index, void *context) {
+    LangInfo *li = &s_lang_list[cell_index->row];
+    bool current = strcmp(li->lang, s_language) == 0;
+    menu_cell_basic_draw(ctx, cell_layer, li->name, current ? "Current" : li->lang, NULL);
+}
+
+static void menu_select_callback(MenuLayer *menu_layer, MenuIndex *cell_index, void *context) {
+    switch_language_to(cell_index->row);
+    window_stack_pop(true);
+}
+
+static void menu_window_unload(Window *window) {
+    menu_layer_destroy(s_menu_layer);
+    s_menu_layer = NULL;
+    window_destroy(s_menu_window);
+    s_menu_window = NULL;
+}
+
+static void open_lang_menu(void) {
+    if (s_menu_window || s_lang_count < 2) return;
+    s_menu_window = window_create();
+    window_set_window_handlers(s_menu_window, (WindowHandlers) {
+        .unload = menu_window_unload,
+    });
+    Layer *root = window_get_root_layer(s_menu_window);
+    GRect bounds = layer_get_bounds(root);
+    s_menu_layer = menu_layer_create(bounds);
+    menu_layer_set_callbacks(s_menu_layer, NULL, (MenuLayerCallbacks) {
+        .get_num_rows = menu_get_num_rows,
+        .draw_row = menu_draw_row,
+        .select_click = menu_select_callback,
+    });
+    menu_layer_set_click_config_onto_window(s_menu_layer, s_menu_window);
+    layer_add_child(root, menu_layer_get_layer(s_menu_layer));
+    window_stack_push(s_menu_window, true);
+}
+
 static void load_previous_day(void);
-static void reset_scroll_to_top(void);
 static void prv_update_indicators(ScrollLayer *scroll_layer, void *context);
 static void swap_down_complete(Animation *animation, bool finished, void *context);
 static void swap_up_complete(Animation *animation, bool finished, void *context);
@@ -783,7 +1108,7 @@ static void load_previous_day(void) {
 
     char prev_date[11];
     add_days_to_date(s_current_year, s_current_month, s_current_day, -1, prev_date, sizeof(prev_date));
-    DayEntry *e = get_day_anywhere(prev_date);
+    DayEntry *e = get_day_anywhere(prev_date, s_language);
 
     if (!e) {
         s_current_day--;
@@ -839,6 +1164,10 @@ static void load_previous_day(void) {
 }
 
 static void select_click_handler(ClickRecognizerRef recognizer, void *context) {
+    if (s_lang_count >= 2) {
+        open_lang_menu();
+        return;
+    }
     DayEntry *e = current_entry();
     if (!e || !e->has_data) {
         if (!s_waiting_for_phone) {
@@ -1001,6 +1330,13 @@ static void back_click_handler(ClickRecognizerRef recognizer, void *context) {
     window_stack_pop(true);
 }
 
+/* Touch input exists only on emery (and gabbro); on other platforms the SDK
+   stubs the touch service, so the handler would be dead code. */
+#if defined(PBL_PLATFORM_EMERY) || defined(PBL_PLATFORM_GABBRO)
+#define HAS_TOUCH 1
+#endif
+
+#ifdef HAS_TOUCH
 static bool s_touch_active;
 static int16_t s_touch_start_y;
 static int s_touch_start_offset;
@@ -1046,6 +1382,7 @@ static void touch_handler(const TouchEvent *event, void *context) {
         }
     }
 }
+#endif /* HAS_TOUCH */
 
 static void click_config_provider(void *context) {
     window_single_click_subscribe(BUTTON_ID_SELECT, select_click_handler);
@@ -1081,7 +1418,7 @@ static void update_ui(void) {
         static char no_data_msg[160];
         snprintf(no_data_msg, sizeof(no_data_msg), "%s\n%s", loc->no_data, loc->retry_hint);
         text_layer_set_text(s_body_layer, no_data_msg);
-        layer_set_frame(text_layer_get_layer(s_body_layer), GRect(4, 0, scroll_w - 8, 200));
+        layer_set_frame(text_layer_get_layer(s_body_layer), GRect(BODY_MARGIN, 0, scroll_w - 2 * BODY_MARGIN, 200));
         layer_set_hidden(text_layer_get_layer(s_body_layer), false);
         scroll_layer_set_content_size(s_scroll_layer, GSize(scroll_w, scroll_frame.size.h));
         layer_set_hidden(s_bottom_arrow_layer, true);
@@ -1090,17 +1427,23 @@ static void update_ui(void) {
         return;
     }
 
-    /* Max possible: ref 127 + text 639 + commentary 1199 + 6 separators = 1971 */
-    static char body_text[2200];
-    snprintf(body_text, sizeof(body_text), "%s\n\n\"%s\"\n\n%s",
+    /* Max possible: ref + text + commentary + 6 separators */
+#if defined(PBL_PLATFORM_APLITE)
+    char *body_text = (char *)s_record_buf;
+    size_t body_capacity = sizeof(s_record_buf);
+#else
+    static char body_text[BODY_TEXT_SIZE];
+    size_t body_capacity = sizeof(body_text);
+#endif
+    snprintf(body_text, body_capacity, "%s\n\n\"%s\"\n\n%s",
              e->ref, e->text, e->commentary);
     text_layer_set_text(s_body_layer, body_text);
 
     GSize text_size = graphics_text_layout_get_content_size(
-        body_text, fonts_get_system_font(FONT_KEY_GOTHIC_28),
-        GRect(0, 0, scroll_w - 8, 8000), GTextOverflowModeWordWrap, GTextAlignmentLeft);
+        body_text, body_font(),
+        GRect(0, 0, scroll_w - 2 * BODY_MARGIN, 8000), GTextOverflowModeWordWrap, GTextAlignmentLeft);
     int body_h = text_size.h + 4;
-    layer_set_frame(text_layer_get_layer(s_body_layer), GRect(4, 0, scroll_w - 8, body_h));
+    layer_set_frame(text_layer_get_layer(s_body_layer), GRect(BODY_MARGIN, 0, scroll_w - 2 * BODY_MARGIN, body_h));
     layer_set_hidden(text_layer_get_layer(s_body_layer), false);
     layer_mark_dirty(text_layer_get_layer(s_body_layer));
 
@@ -1138,7 +1481,7 @@ static void request_bulk_sync(const char *start_date) {
         s_sync_in_progress = false;
         return;
     }
-    add_days_to_date(year, month, day, s_cache_days, end_date, sizeof(end_date));
+    add_days_to_date(year, month, day, future_days_per_language(), end_date, sizeof(end_date));
     
     DictionaryIterator *iter;
     AppMessageResult result = app_message_outbox_begin(&iter);
@@ -1161,14 +1504,14 @@ static void request_bulk_sync(const char *start_date) {
 static void request_from_phone(void) {
     char date_str[11];
     snprintf(date_str, sizeof(date_str), "%d-%02d-%02d", s_current_year, s_current_month, s_current_day);
-    
-    DayEntry *cached = get_day_anywhere(date_str);
+
+    DayEntry *cached = get_day_anywhere(date_str, s_language);
     if (cached) {
         s_waiting_for_phone = false;
         update_ui();
 
         int future_count = count_future_cached_days(date_str);
-        if (future_count < s_cache_days) {
+        if (future_count < future_days_per_language()) {
             request_bulk_sync(date_str);
         }
         return;
@@ -1208,29 +1551,39 @@ static void inbox_received_handler(DictionaryIterator *iter, void *context) {
         if (!date_t || !ref_t || !text_t || !comm_t) return;
 
         const char *date_str = date_t->value->cstring;
+        Tuple *lang_t = dict_find(iter, KEY_LANGUAGE);
+        const char *lang = lang_t ? lang_t->value->cstring : s_language;
 
-        DayEntry *e = find_cache_entry(date_str);
+        /* Persist every in-window result even when the small Aplite RAM cache
+           has no free entry. It can be loaded on demand later. */
+        save_day_to_persist(date_str, lang, ref_t->value->cstring,
+                            text_t->value->cstring, comm_t->value->cstring);
+
+        DayEntry *e = find_cache_entry(date_str, lang);
         if (!e) e = alloc_ram_entry();
-        if (!e) return;
-
-        strncpy(e->date, date_str, sizeof(e->date) - 1);
-        e->date[sizeof(e->date) - 1] = '\0';
-        strncpy(e->ref, ref_t->value->cstring, sizeof(e->ref) - 1);
-        e->ref[sizeof(e->ref) - 1] = '\0';
-        strncpy(e->text, text_t->value->cstring, sizeof(e->text) - 1);
-        e->text[sizeof(e->text) - 1] = '\0';
-        strncpy(e->commentary, comm_t->value->cstring, sizeof(e->commentary) - 1);
-        e->commentary[sizeof(e->commentary) - 1] = '\0';
-        e->has_data = true;
-
-        save_day_to_persist(e);
+        if (e) {
+            strncpy(e->date, date_str, sizeof(e->date) - 1);
+            e->date[sizeof(e->date) - 1] = '\0';
+            strncpy(e->lang, lang, sizeof(e->lang) - 1);
+            e->lang[sizeof(e->lang) - 1] = '\0';
+            copy_trunc(e->ref, sizeof(e->ref), ref_t->value->cstring);
+            copy_trunc(e->text, sizeof(e->text), text_t->value->cstring);
+            copy_trunc(e->commentary, sizeof(e->commentary), comm_t->value->cstring);
+            e->has_data = true;
+        }
 
         int year, month, day;
         if (parse_date(date_str, &year, &month, &day)) {
-            if (year == s_current_year && month == s_current_month && day == s_current_day) {
+            if (year == s_current_year && month == s_current_month && day == s_current_day &&
+                strcmp(lang, s_language) == 0) {
                 s_waiting_for_phone = false;
                 scroll_layer_set_content_offset(s_scroll_layer, GPoint(0, 0), false);
                 update_ui();
+#if defined(PBL_PLATFORM_APLITE)
+            } else {
+                /* Persistence uses the same scratch buffer as rendered text. */
+                update_ui();
+#endif
             }
         }
     } else if (action == ACTION_FETCH_ERROR) {
@@ -1250,7 +1603,7 @@ static void inbox_received_handler(DictionaryIterator *iter, void *context) {
             }
             GRect scroll_frame = layer_get_frame(scroll_layer_get_layer(s_scroll_layer));
             text_layer_set_text(s_body_layer, err_msg);
-            layer_set_frame(text_layer_get_layer(s_body_layer), GRect(4, 0, scroll_frame.size.w - 8, 200));
+            layer_set_frame(text_layer_get_layer(s_body_layer), GRect(BODY_MARGIN, 0, scroll_frame.size.w - 2 * BODY_MARGIN, 200));
             layer_set_hidden(text_layer_get_layer(s_body_layer), false);
             scroll_layer_set_content_size(s_scroll_layer, GSize(scroll_frame.size.w, scroll_frame.size.h));
             layer_set_hidden(s_bottom_arrow_layer, true);
@@ -1262,9 +1615,14 @@ static void inbox_received_handler(DictionaryIterator *iter, void *context) {
         Tuple *lib_t = dict_find(iter, KEY_LIB);
         Tuple *rsconf_t = dict_find(iter, KEY_RSCONF);
         Tuple *cd_t = dict_find(iter, KEY_CACHE_DAYS);
+        Tuple *ll_t = dict_find(iter, KEY_LANGUAGE_LIST);
+        Tuple *ts_t = dict_find(iter, KEY_TEXT_SIZE);
+        if (ll_t) {
+            apply_lang_list(ll_t->value->cstring);
+            persist_write_string(PERSIST_KEY_LANG_LIST, ll_t->value->cstring);
+        }
         if (lang_t) {
-            strncpy(s_language, lang_t->value->cstring, sizeof(s_language) - 1);
-            s_language[sizeof(s_language) - 1] = '\0';
+            copy_trunc(s_language, sizeof(s_language), lang_t->value->cstring);
             persist_write_string(PERSIST_KEY_LANGUAGE, s_language);
         }
         if (lib_t) {
@@ -1283,11 +1641,42 @@ static void inbox_received_handler(DictionaryIterator *iter, void *context) {
             if (s_cache_days > MAX_WATCH_CACHE_DAYS) s_cache_days = MAX_WATCH_CACHE_DAYS;
             persist_write_int(PERSIST_KEY_CACHE_DAYS, s_cache_days);
         }
-        for (int i = 0; i < CACHE_SIZE; i++) s_cache[i].has_data = false;
-        persist_wipe_all();
+        if (ts_t) {
+            s_text_size = ts_t->value->int32 == 1 ? 1 : 0;
+            persist_write_int(PERSIST_KEY_TEXT_SIZE, s_text_size);
+            text_layer_set_font(s_body_layer, body_font());
+        }
+        if (s_lang_count > 0) {
+            /* Multi-language: keep days of languages still in the list. */
+            purge_languages_not_in_list();
+        } else {
+            for (int i = 0; i < CACHE_SIZE; i++) s_cache[i].has_data = false;
+            persist_wipe_all();
+        }
+        prune_persist_cache();
         s_waiting_for_phone = true;
         update_ui();
         request_from_phone();
+    } else if (action == ACTION_LANG_LIST) {
+        Tuple *ll_t = dict_find(iter, KEY_LANGUAGE_LIST);
+        if (ll_t) {
+            apply_lang_list(ll_t->value->cstring);
+            persist_write_string(PERSIST_KEY_LANG_LIST, ll_t->value->cstring);
+            purge_languages_not_in_list();
+            prune_persist_cache();
+            update_ui();
+        }
+    } else if (action == ACTION_SETTINGS) {
+        Tuple *ts_t = dict_find(iter, KEY_TEXT_SIZE);
+        if (ts_t) {
+            int ts = ts_t->value->int32 == 1 ? 1 : 0;
+            if (ts != s_text_size) {
+                s_text_size = ts;
+                persist_write_int(PERSIST_KEY_TEXT_SIZE, s_text_size);
+                text_layer_set_font(s_body_layer, body_font());
+                update_ui();
+            }
+        }
     }
 }
 
@@ -1322,8 +1711,8 @@ static void window_load(Window *window) {
     layer_set_update_proc(s_banner_layer, banner_update_proc);
     layer_add_child(root, s_banner_layer);
 
-    s_body_layer = text_layer_create(GRect(4, 0, bounds.size.w - 8, 8000));
-    text_layer_set_font(s_body_layer, fonts_get_system_font(FONT_KEY_GOTHIC_28));
+    s_body_layer = text_layer_create(GRect(BODY_MARGIN, 0, bounds.size.w - 2 * BODY_MARGIN, 8000));
+    text_layer_set_font(s_body_layer, body_font());
     text_layer_set_text_color(s_body_layer, GColorBlack);
     text_layer_set_background_color(s_body_layer, GColorClear);
     text_layer_set_overflow_mode(s_body_layer, GTextOverflowModeWordWrap);
@@ -1356,9 +1745,11 @@ static void window_load(Window *window) {
 
     window_set_background_color(window, GColorWhite);
 
+#ifdef HAS_TOUCH
     if (touch_service_is_enabled()) {
         touch_service_subscribe(touch_handler, NULL);
     }
+#endif
 
     update_ui();
 }
@@ -1368,9 +1759,11 @@ static void window_unload(Window *window) {
         animation_unschedule(s_scroll_animation);
         s_scroll_animation = NULL;
     }
+#ifdef HAS_TOUCH
     if (touch_service_is_enabled()) {
         touch_service_unsubscribe();
     }
+#endif
     loading_cancel();
     if (s_temp_bar) {
         layer_destroy(s_temp_bar);
@@ -1425,20 +1818,36 @@ static void init(void) {
     if (s_cache_days < MIN_WATCH_CACHE_DAYS) s_cache_days = MIN_WATCH_CACHE_DAYS;
     if (s_cache_days > MAX_WATCH_CACHE_DAYS) s_cache_days = MAX_WATCH_CACHE_DAYS;
 
+    if (persist_exists(PERSIST_KEY_TEXT_SIZE)) {
+        s_text_size = persist_read_int(PERSIST_KEY_TEXT_SIZE) == 1 ? 1 : 0;
+    } else {
+        s_text_size = 0;
+    }
+
+    if (persist_exists(PERSIST_KEY_LANG_LIST)) {
+        char csv[176];
+        if (persist_read_string(PERSIST_KEY_LANG_LIST, csv, sizeof(csv)) > 0) {
+            apply_lang_list(csv);
+        }
+    }
+
     /* Remove the legacy single-blob cache (firmware truncated it to 256 bytes,
        so it only ever held a corrupt fragment), then load the chunked cache. */
     persist_delete(PERSIST_KEY_CACHE);
     persist_dir_load();
+    if (!persist_exists(PERSIST_KEY_MIGRATED)) {
+        if (migrate_legacy_cache()) persist_write_int(PERSIST_KEY_MIGRATED, 1);
+    }
     prune_persist_cache();
 
     /* Preload today (and tomorrow) from persist so the UI is instant and the
        app works with no phone connection at all. */
     char date_str[11];
     snprintf(date_str, sizeof(date_str), "%d-%02d-%02d", s_current_year, s_current_month, s_current_day);
-    get_day_anywhere(date_str);
+    get_day_anywhere(date_str, s_language);
     char next_date[11];
     add_days_to_date(s_current_year, s_current_month, s_current_day, 1, next_date, sizeof(next_date));
-    get_day_anywhere(next_date);
+    get_day_anywhere(next_date, s_language);
 
     tick_timer_service_subscribe(MINUTE_UNIT, tick_handler);
 
@@ -1446,7 +1855,7 @@ static void init(void) {
     app_message_register_inbox_dropped(inbox_dropped_handler);
     app_message_register_outbox_failed(outbox_failed_handler);
     app_message_register_outbox_sent(outbox_sent_handler);
-    app_message_open(8192, 512);
+    app_message_open(APPMSG_INBOX_SIZE, APPMSG_OUTBOX_SIZE);
 
     s_window = window_create();
     window_set_window_handlers(s_window, (WindowHandlers){
@@ -1468,4 +1877,3 @@ int main(void) {
     app_event_loop();
     deinit();
 }
-
