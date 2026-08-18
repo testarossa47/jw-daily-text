@@ -51,10 +51,12 @@ h1 {
   -webkit-overflow-scrolling: touch;
 }
 #list li {
-  padding: 12px 14px;
+  padding: 12px 86px 12px 14px;
   border-bottom: 1px solid #eee;
   cursor: pointer;
   font-size: 16px;
+  line-height: 20px;
+  position: relative;
   transition: background 0.15s;
 }
 #list li:active, #list li:hover {
@@ -121,8 +123,12 @@ h1 {
 }
 .chip .x { margin-left: 6px; font-weight: 700; }
 .add-sw {
-  float: right;
-  padding: 2px 10px;
+  position: absolute;
+  top: 12px;
+  right: 14px;
+  height: 20px;
+  padding: 1px 10px;
+  line-height: 16px;
   font-size: 12px;
   border: 1px solid #799fcc;
   border-radius: 10px;
