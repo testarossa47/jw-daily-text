@@ -86,7 +86,7 @@ h1 {
   color: #555;
   flex: 1;
 }
-#cache-days {
+#phone-cache-days, #watch-cache-days {
   width: 60px;
   padding: 6px 8px;
   font-size: 16px;
@@ -95,7 +95,42 @@ h1 {
   text-align: center;
   outline: none;
 }
-#cache-days:focus { border-color: #799fcc; }
+#phone-cache-days:focus, #watch-cache-days:focus { border-color: #799fcc; }
+#text-size {
+  padding: 6px 8px;
+  font-size: 16px;
+  border: 1px solid #ccc;
+  border-radius: 6px;
+  outline: none;
+  background: #fff;
+}
+#text-size:focus { border-color: #799fcc; }
+.hint {
+  font-size: 12px;
+  color: #999;
+  margin-top: 4px;
+}
+#chips { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 6px; }
+.chip {
+  background: #799fcc;
+  color: #fff;
+  border-radius: 14px;
+  padding: 4px 10px;
+  font-size: 13px;
+  cursor: pointer;
+}
+.chip .x { margin-left: 6px; font-weight: 700; }
+.add-sw {
+  float: right;
+  padding: 2px 10px;
+  font-size: 12px;
+  border: 1px solid #799fcc;
+  border-radius: 10px;
+  background: #fff;
+  color: #799fcc;
+  cursor: pointer;
+}
+#list li.selected .add-sw { display: none; }
 #save-bar {
   position: fixed;
   bottom: 0;
@@ -140,8 +175,24 @@ h1 {
 <div id="count"></div>
 <ul id="list"></ul>
 <div id="cache-section">
-  <label for="cache-days">Offline days (1&#8211;14):</label>
-  <input type="number" id="cache-days" min="1" max="14" value="7">
+  <label for="phone-cache-days">Offline days on phone (1&#8211;30):</label>
+  <input type="number" id="phone-cache-days" min="1" max="30" value="30">
+</div>
+<div id="cache-section">
+  <label for="watch-cache-days">Offline days on watch (7&#8211;30):</label>
+  <input type="number" id="watch-cache-days" min="7" max="30" value="30">
+</div>
+<div id="cache-section">
+  <label for="text-size">Text size:</label>
+  <select id="text-size">
+    <option value="0">Standard</option>
+    <option value="1">Small</option>
+  </select>
+</div>
+<div id="cache-section" style="display:block">
+  <label>Language switch on watch (SELECT button):</label>
+  <div id="chips"></div>
+  <div class="hint">Tap &#8220;+watch&#8221; on up to 3 languages below to also keep them on the watch. Press SELECT on the watch to switch between them. Days are shared across languages.</div>
 </div>
 <div id="status"></div>
 
@@ -157,6 +208,7 @@ let selectedLocale = null;
 let selectedLib = null;
 let selectedName = null;
 let selectedRsconf = null;
+let switchLangs = [];
 
 function showCurrent() {
   const el = document.getElementById("current");
@@ -168,6 +220,38 @@ function showCurrent() {
     }
   }
   el.innerHTML = "Current: <strong>English</strong>";
+}
+
+function renderChips() {
+  const el = document.getElementById("chips");
+  el.innerHTML = "";
+  if (!switchLangs.length) {
+    el.innerHTML = '<span style="font-size:13px;color:#888">None &#8212; only the selected language is kept on the watch.</span>';
+    return;
+  }
+  for (const l of switchLangs) {
+    const chip = document.createElement("span");
+    chip.className = "chip";
+    chip.innerHTML = l.name + '<span class="x">&#10005;</span>';
+    chip.title = "Remove";
+    chip.addEventListener("click", () => removeSwitchLang(l.locale));
+    el.appendChild(chip);
+  }
+}
+
+function addSwitchLang(lang) {
+  if (switchLangs.length >= 3) return;
+  if (lang.locale === selectedLocale) return;
+  if (switchLangs.some(l => l.locale === lang.locale)) return;
+  switchLangs.push({ locale: lang.locale, lib: lang.lib, name: lang.name, rsconf: lang.rsconf || "1" });
+  renderChips();
+  renderList(document.getElementById("search").value);
+}
+
+function removeSwitchLang(locale) {
+  switchLangs = switchLangs.filter(l => l.locale !== locale);
+  renderChips();
+  renderList(document.getElementById("search").value);
 }
 
 function renderList(filter) {
@@ -184,6 +268,16 @@ function renderList(filter) {
     if (lang.locale === selectedLocale) li.className = "selected";
     li.innerHTML = lang.name + '<span class="sub">' + lang.locale + '</span>';
     li.addEventListener("click", () => pickLang(lang));
+    if (lang.locale !== selectedLocale &&
+        switchLangs.length < 3 &&
+        !switchLangs.some(l => l.locale === lang.locale)) {
+      const btn = document.createElement("button");
+      btn.className = "add-sw";
+      btn.textContent = "+watch";
+      btn.title = "Also keep on watch";
+      btn.addEventListener("click", (ev) => { ev.stopPropagation(); addSwitchLang(lang); });
+      li.appendChild(btn);
+    }
     list.appendChild(li);
   }
 }
@@ -205,16 +299,24 @@ function saveSelection() {
     return;
   }
 
-  let cacheDays = parseInt(document.getElementById("cache-days").value, 10);
-  if (isNaN(cacheDays) || cacheDays < 1) cacheDays = 1;
-  if (cacheDays > 14) cacheDays = 14;
+  let phoneCacheDays = parseInt(document.getElementById("phone-cache-days").value, 10);
+  if (isNaN(phoneCacheDays) || phoneCacheDays < 1) phoneCacheDays = 1;
+  if (phoneCacheDays > 30) phoneCacheDays = 30;
+
+  let watchCacheDays = parseInt(document.getElementById("watch-cache-days").value, 10);
+  if (isNaN(watchCacheDays) || watchCacheDays < 7) watchCacheDays = 7;
+  if (watchCacheDays > 30) watchCacheDays = 30;
 
   const data = JSON.stringify({
     locale: selectedLocale,
     lib: selectedLib,
     name: selectedName,
     rsconf: selectedRsconf || "1",
-    cacheDays: cacheDays
+    cacheDays: watchCacheDays,
+    phoneCacheDays: phoneCacheDays,
+    watchCacheDays: watchCacheDays,
+    textSize: parseInt(document.getElementById("text-size").value, 10) === 1 ? 1 : 0,
+    switchLangs: switchLangs
   });
 
   let saved = false;
@@ -243,7 +345,8 @@ function saveSelection() {
 
 function getParams() {
   const p = new URLSearchParams(window.location.search);
-  return { locale: p.get("locale"), lib: p.get("lib"), rsconf: p.get("rsconf") };
+  return { locale: p.get("locale"), lib: p.get("lib"), rsconf: p.get("rsconf"),
+           pcd: p.get("pcd"), wcd: p.get("wcd"), ts: p.get("ts"), sl: p.get("sl") };
 }
 
 const params = getParams();
@@ -256,7 +359,35 @@ if (params.locale && params.lib) {
     selectedRsconf = found.rsconf || params.rsconf || "1";
   }
 }
+(function prefillSettings() {
+  /* Production 2.1.1 only sends locale/lib/rsconf and expects one
+     `cacheDays` value back. Preserve its historical seven-day default. */
+  if (!params.pcd && !params.wcd) {
+    document.getElementById("phone-cache-days").value = 7;
+    document.getElementById("watch-cache-days").value = 7;
+  }
+  const pcd = parseInt(params.pcd, 10);
+  if (!isNaN(pcd)) {
+    document.getElementById("phone-cache-days").value = Math.min(30, Math.max(1, pcd));
+  }
+  const wcd = parseInt(params.wcd, 10);
+  if (!isNaN(wcd)) {
+    document.getElementById("watch-cache-days").value = Math.min(30, Math.max(7, wcd));
+  }
+  if (params.ts === "1") {
+    document.getElementById("text-size").value = "1";
+  }
+  if (params.sl) {
+    try {
+      const parsed = JSON.parse(params.sl);
+      if (Array.isArray(parsed)) {
+        switchLangs = parsed.filter(l => l && l.locale && l.lib).slice(0, 3);
+      }
+    } catch (e) {}
+  }
+})();
 showCurrent();
+renderChips();
 renderList("");
 
 document.getElementById("search").addEventListener("input", function() {

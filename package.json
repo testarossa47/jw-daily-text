@@ -1,9 +1,10 @@
 {
   "name": "jw-daily-text",
   "author": "JW Daily Text Contributors",
-  "version": "2.1.1",
+  "version": "2.4.0",
   "description": "Daily Text app for Pebble smartwatches. Displays Jehovah's Witnesses daily Bible scripture with commentary in any language.",
   "keywords": ["pebble-app", "jw", "daily-text"],
+  "license": "MIT",
   "private": true,
   "dependencies": {},
   "pebble": {
@@ -11,7 +12,7 @@
     "uuid": "ecca2ec3-068b-4cff-a500-a27184c1b841",
     "sdkVersion": "3",
     "enableMultiJS": true,
-    "targetPlatforms": ["emery"],
+    "targetPlatforms": ["aplite", "basalt", "chalk", "diorite", "flint", "emery"],
     "watchapp": {
       "watchface": false
     },
@@ -37,7 +38,9 @@
       "rsconf",
       "action_sync_range",
       "start_date",
-      "end_date"
+      "end_date",
+      "text_size",
+      "language_list"
     ],
     "resources": {
       "media": [
