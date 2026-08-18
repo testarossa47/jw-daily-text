@@ -873,14 +873,32 @@ static uint16_t menu_get_num_rows(MenuLayer *menu_layer, uint16_t section_index,
     return s_lang_count;
 }
 
+/* Put every alternative before the active language. With two languages the
+   first menu row is always the one to switch to, enabling SELECT, SELECT. */
+static int menu_language_index(uint16_t row) {
+    int current = -1;
+    int alternatives = 0;
+    for (int i = 0; i < s_lang_count; i++) {
+        if (strcmp(s_lang_list[i].lang, s_language) == 0) {
+            current = i;
+        } else if (alternatives++ == row) {
+            return i;
+        }
+    }
+    if (current >= 0 && row == alternatives) return current;
+    return row < s_lang_count ? row : -1;
+}
+
 static void menu_draw_row(GContext *ctx, const Layer *cell_layer, MenuIndex *cell_index, void *context) {
-    LangInfo *li = &s_lang_list[cell_index->row];
+    int idx = menu_language_index(cell_index->row);
+    if (idx < 0) return;
+    LangInfo *li = &s_lang_list[idx];
     bool current = strcmp(li->lang, s_language) == 0;
     menu_cell_basic_draw(ctx, cell_layer, li->name, current ? "Current" : li->lang, NULL);
 }
 
 static void menu_select_callback(MenuLayer *menu_layer, MenuIndex *cell_index, void *context) {
-    switch_language_to(cell_index->row);
+    switch_language_to(menu_language_index(cell_index->row));
     window_stack_pop(true);
 }
 
