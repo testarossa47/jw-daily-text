@@ -810,7 +810,7 @@ static DayEntry *get_day_anywhere(const char *date_str, const char *lang) {
 /* Body font from the text-size setting (issue #15): 0 = standard, 1 = small
    (roughly the size the official Pebble weather app uses). */
 static GFont body_font(void) {
-    return fonts_get_system_font(s_text_size == 1 ? FONT_KEY_GOTHIC_24 : FONT_KEY_GOTHIC_28);
+    return fonts_get_system_font(s_text_size == 1 ? FONT_KEY_GOTHIC_24_BOLD : FONT_KEY_GOTHIC_28);
 }
 
 static void copy_trunc(char *dst, size_t dst_size, const char *src) {
