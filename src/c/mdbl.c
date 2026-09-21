@@ -110,6 +110,7 @@ static const int ACTION_LANGUAGE_CHANGED = 4;
 static const int ACTION_SYNC_RANGE = 5;
 static const int ACTION_LANG_LIST = 6;
 static const int ACTION_SETTINGS = 7;
+static const int ACTION_TEXT_SIZE = 8;
 
 static Window *s_window;
 static ScrollLayer *s_scroll_layer;
@@ -142,8 +143,13 @@ static int s_text_size; /* 0 = standard, 1 = small */
 
 static LangInfo s_lang_list[MAX_LANG_LIST];
 static int s_lang_count = 0;
-static Window *s_menu_window;
-static MenuLayer *s_menu_layer;
+
+typedef enum { MENU_ROOT, MENU_LANG, MENU_TEXT_SIZE } MenuMode;
+
+typedef struct {
+    MenuMode mode;
+    MenuLayer *layer;
+} MenuContext;
 
 static DayEntry s_cache[CACHE_SIZE];
 static bool s_sync_in_progress = false;
@@ -217,6 +223,11 @@ typedef struct {
     const char *weekdays[7];   /* Monday .. Sunday */
     const char *months[12];
     int date_style;            /* 0: "Fri July 17th", 1: "Fr 17. Juli", 2: "Ven 17 juillet" */
+    const char *menu_language;
+    const char *menu_text_size;
+    const char *menu_standard;
+    const char *menu_small;
+    const char *menu_current;
 } LocaleStrings;
 
 static const LocaleStrings LOCALE_EN = {
@@ -228,7 +239,12 @@ static const LocaleStrings LOCALE_EN = {
     {"Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"},
     {"January", "February", "March", "April", "May", "June",
      "July", "August", "September", "October", "November", "December"},
-    0
+    0,
+    "Language",
+    "Text size",
+    "Standard",
+    "Small",
+    "Current"
 };
 
 static const LocaleStrings LOCALE_DE = {
@@ -240,7 +256,12 @@ static const LocaleStrings LOCALE_DE = {
     {"Mo", "Di", "Mi", "Do", "Fr", "Sa", "So"},
     {"Januar", "Februar", "März", "April", "Mai", "Juni",
      "Juli", "August", "September", "Oktober", "November", "Dezember"},
-    1
+    1,
+    "Sprache",
+    "Textgröße",
+    "Standard",
+    "Klein",
+    "Aktuell"
 };
 
 static const LocaleStrings LOCALE_IT = {
@@ -252,7 +273,12 @@ static const LocaleStrings LOCALE_IT = {
     {"Lun", "Mar", "Mer", "Gio", "Ven", "Sab", "Dom"},
     {"gennaio", "febbraio", "marzo", "aprile", "maggio", "giugno",
      "luglio", "agosto", "settembre", "ottobre", "novembre", "dicembre"},
-    2
+    2,
+    "Lingua",
+    "Dimensione testo",
+    "Standard",
+    "Piccolo",
+    "Attuale"
 };
 
 static const LocaleStrings LOCALE_ES = {
@@ -264,7 +290,12 @@ static const LocaleStrings LOCALE_ES = {
     {"Lun", "Mar", "Mié", "Jue", "Vie", "Sáb", "Dom"},
     {"enero", "febrero", "marzo", "abril", "mayo", "junio",
      "julio", "agosto", "septiembre", "octubre", "noviembre", "diciembre"},
-    2
+    2,
+    "Idioma",
+    "Tamaño del texto",
+    "Estándar",
+    "Pequeño",
+    "Actual"
 };
 
 static const LocaleStrings LOCALE_FR = {
@@ -276,7 +307,12 @@ static const LocaleStrings LOCALE_FR = {
     {"Lun", "Mar", "Mer", "Jeu", "Ven", "Sam", "Dim"},
     {"janvier", "février", "mars", "avril", "mai", "juin",
      "juillet", "août", "septembre", "octobre", "novembre", "décembre"},
-    2
+    2,
+    "Langue",
+    "Taille du texte",
+    "Standard",
+    "Petit",
+    "Actuel"
 };
 
 static const LocaleStrings *current_locale(void) {
@@ -813,6 +849,22 @@ static GFont body_font(void) {
     return fonts_get_system_font(s_text_size == 1 ? FONT_KEY_GOTHIC_24_BOLD : FONT_KEY_GOTHIC_28);
 }
 
+static void set_text_size(int size) {
+    size = (size == 1) ? 1 : 0;
+    if (size == s_text_size) return;
+    s_text_size = size;
+    persist_write_int(PERSIST_KEY_TEXT_SIZE, s_text_size);
+    text_layer_set_font(s_body_layer, body_font());
+    update_ui();
+
+    DictionaryIterator *iter;
+    if (app_message_outbox_begin(&iter) == APP_MSG_OK) {
+        dict_write_int32(iter, KEY_ACTION, ACTION_TEXT_SIZE);
+        dict_write_int32(iter, KEY_TEXT_SIZE, s_text_size);
+        app_message_outbox_send();
+    }
+}
+
 static void copy_trunc(char *dst, size_t dst_size, const char *src) {
     size_t n = utf8_prefix_len(src, dst_size - 1);
     memcpy(dst, src, n);
@@ -870,6 +922,8 @@ static void switch_language_to(int idx) {
 }
 
 static uint16_t menu_get_num_rows(MenuLayer *menu_layer, uint16_t section_index, void *context) {
+    MenuContext *mctx = context;
+    if (mctx->mode == MENU_ROOT || mctx->mode == MENU_TEXT_SIZE) return 2;
     return s_lang_count;
 }
 
@@ -889,43 +943,92 @@ static int menu_language_index(uint16_t row) {
     return row < s_lang_count ? row : -1;
 }
 
+static const char *current_language_name(void) {
+    for (int i = 0; i < s_lang_count; i++) {
+        if (strcmp(s_lang_list[i].lang, s_language) == 0) return s_lang_list[i].name;
+    }
+    return s_language;
+}
+
 static void menu_draw_row(GContext *ctx, const Layer *cell_layer, MenuIndex *cell_index, void *context) {
+    MenuContext *mctx = context;
+    const LocaleStrings *loc = current_locale();
+
+    if (mctx->mode == MENU_ROOT) {
+        if (cell_index->row == 0) {
+            menu_cell_basic_draw(ctx, cell_layer, loc->menu_language, current_language_name(), NULL);
+        } else {
+            menu_cell_basic_draw(ctx, cell_layer, loc->menu_text_size,
+                                 s_text_size == 1 ? loc->menu_small : loc->menu_standard, NULL);
+        }
+        return;
+    }
+
+    if (mctx->mode == MENU_TEXT_SIZE) {
+        if (cell_index->row == 0) {
+            menu_cell_basic_draw(ctx, cell_layer, loc->menu_standard,
+                                 s_text_size == 0 ? loc->menu_current : NULL, NULL);
+        } else {
+            menu_cell_basic_draw(ctx, cell_layer, loc->menu_small,
+                                 s_text_size == 1 ? loc->menu_current : NULL, NULL);
+        }
+        return;
+    }
+
     int idx = menu_language_index(cell_index->row);
     if (idx < 0) return;
     LangInfo *li = &s_lang_list[idx];
     bool current = strcmp(li->lang, s_language) == 0;
-    menu_cell_basic_draw(ctx, cell_layer, li->name, current ? "Current" : li->lang, NULL);
+    menu_cell_basic_draw(ctx, cell_layer, li->name, current ? loc->menu_current : li->lang, NULL);
+}
+
+static void open_menu(MenuMode mode);
+
+static void close_menu(void) {
+    while (window_stack_get_top_window() != s_window) {
+        window_stack_pop(false);
+    }
 }
 
 static void menu_select_callback(MenuLayer *menu_layer, MenuIndex *cell_index, void *context) {
-    switch_language_to(menu_language_index(cell_index->row));
-    window_stack_pop(true);
+    MenuContext *mctx = context;
+    if (mctx->mode == MENU_ROOT) {
+        open_menu(cell_index->row == 0 ? MENU_LANG : MENU_TEXT_SIZE);
+    } else if (mctx->mode == MENU_LANG) {
+        switch_language_to(menu_language_index(cell_index->row));
+        close_menu();
+    } else {
+        set_text_size(cell_index->row);
+        close_menu();
+    }
 }
 
 static void menu_window_unload(Window *window) {
-    menu_layer_destroy(s_menu_layer);
-    s_menu_layer = NULL;
-    window_destroy(s_menu_window);
-    s_menu_window = NULL;
+    MenuContext *mctx = window_get_user_data(window);
+    menu_layer_destroy(mctx->layer);
+    free(mctx);
+    window_destroy(window);
 }
 
-static void open_lang_menu(void) {
-    if (s_menu_window || s_lang_count < 2) return;
-    s_menu_window = window_create();
-    window_set_window_handlers(s_menu_window, (WindowHandlers) {
+static void open_menu(MenuMode mode) {
+    MenuContext *mctx = malloc(sizeof(MenuContext));
+    mctx->mode = mode;
+    Window *menu_window = window_create();
+    window_set_user_data(menu_window, mctx);
+    window_set_window_handlers(menu_window, (WindowHandlers) {
         .unload = menu_window_unload,
     });
-    Layer *root = window_get_root_layer(s_menu_window);
+    Layer *root = window_get_root_layer(menu_window);
     GRect bounds = layer_get_bounds(root);
-    s_menu_layer = menu_layer_create(bounds);
-    menu_layer_set_callbacks(s_menu_layer, NULL, (MenuLayerCallbacks) {
+    mctx->layer = menu_layer_create(bounds);
+    menu_layer_set_callbacks(mctx->layer, mctx, (MenuLayerCallbacks) {
         .get_num_rows = menu_get_num_rows,
         .draw_row = menu_draw_row,
         .select_click = menu_select_callback,
     });
-    menu_layer_set_click_config_onto_window(s_menu_layer, s_menu_window);
-    layer_add_child(root, menu_layer_get_layer(s_menu_layer));
-    window_stack_push(s_menu_window, true);
+    menu_layer_set_click_config_onto_window(mctx->layer, menu_window);
+    layer_add_child(root, menu_layer_get_layer(mctx->layer));
+    window_stack_push(menu_window, true);
 }
 
 static void load_previous_day(void);
@@ -1182,10 +1285,6 @@ static void load_previous_day(void) {
 }
 
 static void select_click_handler(ClickRecognizerRef recognizer, void *context) {
-    if (s_lang_count >= 2) {
-        open_lang_menu();
-        return;
-    }
     DayEntry *e = current_entry();
     if (!e || !e->has_data) {
         if (!s_waiting_for_phone) {
@@ -1193,7 +1292,9 @@ static void select_click_handler(ClickRecognizerRef recognizer, void *context) {
             update_ui();
             request_from_phone();
         }
+        return;
     }
+    open_menu(MENU_ROOT);
 }
 
 static void scroll_anim_update(Animation *animation, const AnimationProgress progress) {

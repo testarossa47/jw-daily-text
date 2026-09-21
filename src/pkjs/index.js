@@ -6,6 +6,7 @@ var ACTION_LANGUAGE_CHANGED = 4;
 var ACTION_SYNC_RANGE = 5;
 var ACTION_LANG_LIST = 6;
 var ACTION_SETTINGS = 7;
+var ACTION_TEXT_SIZE = 8;
 var KNOWN_RSCONF = { "en": "1", "de": "10", "es": "4", "ja": "7" };
 var LS_PREFIX = "dt.";
 var MAX_SWITCH_LANGS = 3;
@@ -526,6 +527,14 @@ Pebble.addEventListener("webviewclosed", function (e) {
 
 Pebble.addEventListener("appmessage", function (e) {
 	var payload = e.payload;
+
+	if (payload.action === ACTION_TEXT_SIZE) {
+		textSize = (payload.text_size === 1) ? 1 : 0;
+		localStorage.setItem(LS_PREFIX + "_textSize", String(textSize));
+		saveState();
+		return;
+	}
+
 	if (configPending) sendConfiguration(1, restartYearlyImport);
 
 	/* Piggyback settings + language list on watch-initiated traffic. They are
